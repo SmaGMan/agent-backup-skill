@@ -1,0 +1,6 @@
+# Local runtime config/state - never publish
+.agent-state-backup.conf
+bin/
+*.log
+*.tmp
+.DS_Store
