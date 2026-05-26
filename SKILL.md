@@ -48,6 +48,11 @@ agent-state-backup/
     └── config.example
 ```
 
+Persistent exclude patterns live in the skill repository, not in the backup repository:
+
+- `excludes.txt` — tracked skill file with user-approved persistent exclude patterns;
+- `excluded.txt` — generated audit log inside the backup repository with files removed/redacted during backup.
+
 Runtime files ignored by `.gitignore`:
 
 - `.agent-state-backup.conf` — local config with private backup repo URL;
@@ -78,14 +83,14 @@ Runtime files ignored by `.gitignore`:
 3. If present but not a git repo, initializes git and links it to the private repo.
 4. If present but missing `origin`, prompts for the repo URL and adds it.
 5. Saves the private repo URL to local `.agent-state-backup.conf` in the skill repo; this file must never be committed.
-6. Prompts for a cron schedule, defaulting to `5 2 * * *` (02:05 UTC), then creates a Hermes cron no-agent job when the `hermes` CLI is available.
+6. Prompts for a cron schedule, defaulting to `5 0 * * *` (00:05 UTC), then creates a Hermes cron no-agent job when the `hermes` CLI is available.
 
 ### Backup
 
 `backup.sh`:
 
 1. Copies `/opt/data` to `/opt/data/git/agent-state-backup`.
-2. Excludes the backup repo itself and known credential-only files/directories:
+2. Excludes paths from `excludes.txt` in the skill directory. This file is the persistent source of truth for backup exclusions and currently excludes known credential-only files/directories and `/opt/data/git/`:
    - `auth.json`
    - `google_client_secret.json`
    - `google_token.json`
@@ -97,8 +102,16 @@ Runtime files ignored by `.gitignore`:
 6. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
 7. Automatically redacts scanner-detected secrets when safe to do so.
 8. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-9. Writes non-secret audit details to `excluded.txt` and persistent exclude patterns to `excludes.txt` in the backup repository.
+9. Writes non-secret audit details to `excluded.txt` in the backup repository. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
 10. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
+
+To add something that was mistakenly backed up or should be skipped going forward, run:
+
+```bash
+./scripts/backup.sh --add-exclude relative/path/or-pattern
+```
+
+Then remove the already-backed-up path from the backup repository in a corrective commit or amend, depending on whether the last backup commit is being fixed.
 
 ### Restore
 
@@ -109,7 +122,7 @@ Runtime files ignored by `.gitignore`:
 3. Shows available backup commits.
 4. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
 5. Checks out the selected commit.
-6. Copies files back to `/opt/data` while respecting `excludes.txt` and preserving current secrets in `.env`.
+6. Copies files back to `/opt/data` while respecting the skill directory's `excludes.txt` and preserving current secrets in `.env`. Older backup commits may contain an obsolete `excludes.txt` file in the backup repository; restore skips that file and does not treat it as the source of truth.
 7. Prints manual steps needed to restore secrets that were intentionally excluded.
 
 ## Cron Failure Handling
@@ -141,6 +154,7 @@ Important: scanner reports are temporary local files, deleted after use, and sec
 - [ ] `.agent-state-backup.conf` exists locally and is not tracked.
 - [ ] `scripts/backup.sh` runs successfully and pushes a commit.
 - [ ] `excluded.txt` lists removed/redacted paths without secret values.
+- [ ] `excludes.txt` exists in the skill directory, is tracked with the skill, is not present in new backup commits, and does not exclude user-requested state directories such as `sessions/`.
 - [ ] `gitleaks detect --source /opt/data/git/agent-state-backup` returns clean.
 - [ ] First run completed `trufflehog filesystem` successfully.
 - [ ] `scripts/restore.sh` lists commits and preserves existing `.env` secrets during restore.

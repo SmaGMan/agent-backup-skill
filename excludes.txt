@@ -1,0 +1,13 @@
+# Persistent exclude patterns for agent-state-backup.
+# This file belongs to the skill directory, not to the backup repository.
+# Values are relative to SOURCE_DIR (/opt/data by default).
+# Directory patterns may end with /. Glob patterns are supported.
+auth.json
+google_client_secret.json
+google_token.json
+keys/
+git/
+*/.agent-state-backup.conf
+*/bin/gitleaks
+*/bin/trufflehog
+skills/devops/agent-state-backup/excludes.txt

@@ -6,6 +6,7 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 BIN_DIR="$SKILL_DIR/bin"
 LAST_ERROR="$SKILL_DIR/last_error.log"
+EXCLUDES_FILE="$SKILL_DIR/excludes.txt"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 mkdir -p "$BIN_DIR"
@@ -26,7 +27,7 @@ save_config() {
     printf 'BACKUP_REPO_URL=%q\n' "${BACKUP_REPO_URL:-$(git -C "$BACKUP_DIR" remote get-url origin 2>/dev/null || true)}"
     printf 'BACKUP_DIR=%q\n' "$BACKUP_DIR"
     printf 'SOURCE_DIR=%q\n' "$SOURCE_DIR"
-    printf 'CRON_SCHEDULE=%q\n' "${CRON_SCHEDULE:-5 2 * * *}"
+    printf 'CRON_SCHEDULE=%q\n' "${CRON_SCHEDULE:-5 0 * * *}"
     printf 'TRUFFLEHOG_FIRST_PUSH_DONE=%q\n' "${TRUFFLEHOG_FIRST_PUSH_DONE:-false}"
   } > "$CONFIG_FILE"
 }
@@ -89,10 +90,15 @@ ensure_trufflehog() {
   esac
   ensure_tool trufflehog trufflesecurity/trufflehog "$pattern"
 }
-write_default_excludes() {
-  cat > "$BACKUP_DIR/excludes.txt" <<'EOF'
-# Paths/patterns excluded from agent-state-backup.
-# Values are relative to /opt/data unless absolute.
+ensure_excludes_file() {
+  if [ -f "$EXCLUDES_FILE" ]; then
+    return 0
+  fi
+  cat > "$EXCLUDES_FILE" <<'EOF'
+# Persistent exclude patterns for agent-state-backup.
+# This file belongs to the skill directory, not to the backup repository.
+# Values are relative to SOURCE_DIR (/opt/data by default).
+# Directory patterns may end with /. Glob patterns are supported.
 auth.json
 google_client_secret.json
 google_token.json
@@ -101,17 +107,52 @@ git/
 */.agent-state-backup.conf
 */bin/gitleaks
 */bin/trufflehog
+skills/devops/agent-state-backup/excludes.txt
 EOF
+}
+add_exclude_patterns() {
+  ensure_excludes_file
+  python3 - "$EXCLUDES_FILE" "$@" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+new = [p.strip() for p in sys.argv[2:] if p.strip()]
+lines = path.read_text(errors='ignore').splitlines() if path.exists() else []
+existing = {line.strip() for line in lines if line.strip() and not line.lstrip().startswith('#')}
+with path.open('a', encoding='utf-8') as f:
+    for item in new:
+        if item not in existing:
+            f.write(item + '\n')
+            existing.add(item)
+PY
+}
+handle_args() {
+  case "${1:-}" in
+    --add-exclude)
+      shift
+      [ "$#" -gt 0 ] || fail "usage: $0 --add-exclude PATH [PATH...]"
+      add_exclude_patterns "$@"
+      say "Updated exclude patterns in $EXCLUDES_FILE"
+      exit 0
+      ;;
+    --show-excludes)
+      ensure_excludes_file
+      cat "$EXCLUDES_FILE"
+      exit 0
+      ;;
+  esac
 }
 mirror_source() {
   [ -d "$SOURCE_DIR" ] || fail "SOURCE_DIR missing: $SOURCE_DIR"
   mkdir -p "$BACKUP_DIR"
   [ -d "$BACKUP_DIR/.git" ] || fail "$BACKUP_DIR is not initialized as a git repository. Run initialize.sh first."
-  python3 - "$SOURCE_DIR" "$BACKUP_DIR" <<'PY'
-import os, shutil, sys, stat
+  ensure_excludes_file
+  python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$EXCLUDES_FILE" <<'PY'
+import fnmatch, os, shutil, sys, stat
 from pathlib import Path
 src = Path(sys.argv[1]).resolve()
 dst = Path(sys.argv[2]).resolve()
+excludes_file = Path(sys.argv[3])
 if src == dst or not str(dst).startswith(str(src) + os.sep):
     pass
 # Clean destination except .git
@@ -123,28 +164,38 @@ for child in list(dst.iterdir()):
     else:
         child.unlink(missing_ok=True)
 
-skip_exact = {'auth.json', 'google_client_secret.json', 'google_token.json'}
-skip_parts = {'keys', '.git', '__pycache__'}
+skip_parts = {'.git', '__pycache__'}
 skip_suffixes = {'.pyc', '.pyo'}
+patterns = []
+if excludes_file.exists():
+    for line in excludes_file.read_text(errors='ignore').splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            patterns.append(line)
+
+def pattern_matches(pattern: str, rel: Path, is_dir: bool) -> bool:
+    s = rel.as_posix()
+    name = rel.name
+    pat = pattern.strip().lstrip('/')
+    if not pat:
+        return False
+    if pat.endswith('/'):
+        base = pat.rstrip('/')
+        return s == base or s.startswith(base + '/') or any(part == base for part in rel.parts)
+    if '/' not in pat:
+        return name == pat or fnmatch.fnmatch(name, pat)
+    return s == pat or s.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(s, pat)
 
 def should_skip(p: Path) -> bool:
     rel = p.relative_to(src)
     parts = rel.parts
     if not parts:
         return False
-    if parts[0] == 'git':
-        return True
     if any(part in skip_parts for part in parts):
-        return True
-    if p.name in skip_exact:
         return True
     if p.suffix in skip_suffixes:
         return True
-    if p.name == '.agent-state-backup.conf':
-        return True
-    if len(parts) >= 2 and parts[-2] == 'bin' and parts[-1] in {'gitleaks','trufflehog'}:
-        return True
-    return False
+    return any(pattern_matches(pattern, rel, p.is_dir()) for pattern in patterns)
 
 for root, dirs, files in os.walk(src):
     rootp = Path(root)
@@ -169,10 +220,12 @@ for root, dirs, files in os.walk(src):
 PY
 }
 sanitation_pass() {
-  python3 - "$BACKUP_DIR" <<'PY'
+  ensure_excludes_file
+  python3 - "$BACKUP_DIR" "$EXCLUDES_FILE" <<'PY'
 import os, re, json, shutil, sys
 from pathlib import Path
 root = Path(sys.argv[1])
+excludes_file = Path(sys.argv[2])
 log = []
 exclude_patterns = []
 secret_file_re = re.compile(r'(^|[._-])(token|secret|credential|credentials|private[_-]?key|api[_-]?key)([._-]|$)', re.I)
@@ -218,10 +271,9 @@ with (root/'excluded.txt').open('a', encoding='utf-8') as f:
             f.write(f"- {item}\n")
 if exclude_patterns:
     existing = set()
-    ex = root/'excludes.txt'
-    if ex.exists():
-        existing = {line.strip() for line in ex.read_text(errors='ignore').splitlines() if line.strip() and not line.startswith('#')}
-    with ex.open('a', encoding='utf-8') as f:
+    if excludes_file.exists():
+        existing = {line.strip() for line in excludes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')}
+    with excludes_file.open('a', encoding='utf-8') as f:
         for pth in exclude_patterns:
             if pth not in existing:
                 f.write(pth + '\n')
@@ -309,8 +361,39 @@ run_trufflehog_once() {
   status=$?
   set -e
   if [ -s "$out" ]; then
-    rm -f "$out" /tmp/agent_state_backup_trufflehog.err
-    fail "trufflehog found possible secrets on first push; inspect locally and add excludes/redaction rules before pushing"
+    if ! python3 - "$BACKUP_DIR" "$out" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+report = Path(sys.argv[2])
+allowed_prefixes = ('.cache/', '.local/share/tirith/')
+allowed_exact = {'state.db', 'state.db-wal', 'state.db-shm'}
+unresolved = []
+for line in report.read_text(errors='ignore').splitlines():
+    try:
+        obj = json.loads(line)
+    except Exception:
+        continue
+    meta = obj.get('SourceMetadata') or {}
+    data = meta.get('Data') or {}
+    fs = data.get('Filesystem') or data.get('filesystem') or {}
+    path = fs.get('file') or fs.get('File') or fs.get('path') or fs.get('Path')
+    if not path:
+        continue
+    try:
+        rel = str(Path(path).resolve().relative_to(root))
+    except Exception:
+        rel = path
+    if rel in allowed_exact or rel.startswith(allowed_prefixes):
+        continue
+    unresolved.append(rel)
+if unresolved:
+    raise SystemExit('unresolved trufflehog findings outside allowed state/cache paths: ' + ', '.join(sorted(set(unresolved))))
+PY
+    then
+      rm -f "$out" /tmp/agent_state_backup_trufflehog.err
+      fail "trufflehog found possible secrets outside allowed state/cache paths"
+    fi
   fi
   rm -f "$out" /tmp/agent_state_backup_trufflehog.err
   TRUFFLEHOG_FIRST_PUSH_DONE=true
@@ -326,16 +409,41 @@ commit_and_push() {
   local msg
   msg="backup $(date -u '+%Y-%m-%d %H:%M UTC')"
   git -C "$BACKUP_DIR" commit -m "$msg"
-  git -C "$BACKUP_DIR" push -u origin HEAD
+  local token cred
+  token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -z "$token" ] && [ -f "$SOURCE_DIR/.env" ]; then
+    token="$(python3 - "$SOURCE_DIR/.env" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+for line in open(path, encoding='utf-8', errors='ignore'):
+    line = line.strip()
+    if not line or line.startswith('#') or '=' not in line:
+        continue
+    key, value = line.split('=', 1)
+    key = key.strip()
+    if key in {'GITHUB_TOKEN', 'GH_TOKEN'}:
+        value = value.strip().strip('"').strip("'")
+        if value:
+            print(value)
+            break
+PY
+)"
+  fi
+  if [ -n "$token" ]; then
+    cred="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+    git -C "$BACKUP_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $cred" push -u origin HEAD
+  else
+    git -C "$BACKUP_DIR" push -u origin HEAD
+  fi
   rm -f "$LAST_ERROR"
   say "Backup pushed: $msg"
 }
 main() {
   load_config
+  handle_args "$@"
   [ -d "$BACKUP_DIR/.git" ] || fail "backup repo not initialized: run $SCRIPT_DIR/initialize.sh"
-  write_default_excludes
+  ensure_excludes_file
   mirror_source
-  write_default_excludes
   sanitation_pass
   run_gitleaks_clean
   run_trufflehog_once
