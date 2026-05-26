@@ -92,7 +92,7 @@ Runtime files ignored by `.gitignore`:
    - `keys/`
    - `/opt/data/git/`, which contains all local git repositories including the private backup repo and public skill checkouts
 3. Removes additional standalone credential files by filename/content heuristics.
-4. Redacts `TELEGRAM_BOT_TOKEN` from `.env` and also redacts common token/key/secret/password environment variables.
+4. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
 5. Runs `gitleaks`, installing it locally if missing.
 6. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
 7. Automatically redacts scanner-detected secrets when safe to do so.

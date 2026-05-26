@@ -15,7 +15,7 @@ Known explicit excludes:
 - `/opt/data/git/` — all local git repositories, including this public skill repo and the private backup repo
 - local runtime files for this skill
 
-The script also removes standalone key/token/secret files and redacts common secret variables in text config files.
+The script also removes standalone key/token/secret files and redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and other common secret variables in text config files.
 
 ## Quick start
 

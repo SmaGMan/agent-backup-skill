@@ -206,7 +206,7 @@ for p in list(root.rglob('*')):
         text = assignment_re.sub(lambda m: m.group(1) + 'REDACTED_BY_AGENT_STATE_BACKUP', text)
         text = yaml_re.sub(lambda m: m.group(1) + 'REDACTED_BY_AGENT_STATE_BACKUP', text)
         text = json_re.sub(lambda m: m.group(1) + '"REDACTED_BY_AGENT_STATE_BACKUP"', text)
-        text = re.sub(r'(?im)^(TELEGRAM_BOT_TOKEN\s*=\s*).+$', r'\1REDACTED_BY_AGENT_STATE_BACKUP', text)
+        text = re.sub(r'(?im)^((?:TELEGRAM_BOT_TOKEN|GITHUB_TOKEN|GH_TOKEN)\s*=\s*).+$', r'\1REDACTED_BY_AGENT_STATE_BACKUP', text)
         if text != original:
             p.write_text(text, encoding='utf-8')
             log.append(f"redacted secret-like assignments in: {r}")
