@@ -2,5 +2,5 @@
 BACKUP_REPO_URL=git@github.com:OWNER/PRIVATE-BACKUP-REPO.git
 BACKUP_DIR=/opt/data/git/agent-state-backup
 SOURCE_DIR=/opt/data
-CRON_SCHEDULE=5 2 * * *
+CRON_SCHEDULE=5 0 * * *
 TRUFFLEHOG_FIRST_PUSH_DONE=false

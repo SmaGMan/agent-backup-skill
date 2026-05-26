@@ -6,7 +6,7 @@ SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
-DEFAULT_CRON="5 2 * * *"
+DEFAULT_CRON="5 0 * * *"
 
 say() { printf '%s\n' "$*"; }
 ask() {
