@@ -4,7 +4,7 @@ Reusable Hermes Agent skill for backing up `/opt/data` into a private GitHub rep
 
 ## What it backs up
 
-By default the backup script copies most of `/opt/data` into `/opt/data/agent-state-backup`, then removes/redacts secrets before commit and push.
+By default the backup script copies most of `/opt/data` into `/opt/data/git/agent-state-backup`, then removes/redacts secrets before commit and push.
 
 Known explicit excludes:
 
@@ -12,8 +12,7 @@ Known explicit excludes:
 - `google_client_secret.json`
 - `google_token.json`
 - `keys/`
-- `agent-state-backup/` itself
-- `hermes-agent-backup-skill/` public skill checkout itself
+- `/opt/data/git/` — all local git repositories, including this public skill repo and the private backup repo
 - local runtime files for this skill
 
 The script also removes standalone key/token/secret files and redacts common secret variables in text config files.
@@ -65,7 +64,7 @@ The job runs in `--no-agent` mode. On success it stays silent. On error it emits
 
 The script:
 
-- mirrors `/opt/data` into `/opt/data/agent-state-backup`;
+- mirrors `/opt/data` into `/opt/data/git/agent-state-backup`;
 - removes known secrets;
 - redacts `.env` and common config assignments;
 - runs `gitleaks` every time;

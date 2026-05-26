@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 
 say() { printf '%s\n' "$*"; }
 ask() {
@@ -24,7 +24,7 @@ load_config() {
     . "$CONFIG_FILE"
   fi
   SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-  BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+  BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 }
 save_config() {
   umask 077

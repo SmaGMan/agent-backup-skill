@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 DEFAULT_CRON="5 2 * * *"
 
 say() { printf '%s\n' "$*"; }
@@ -25,7 +25,7 @@ load_config() {
     . "$CONFIG_FILE"
   fi
   SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-  BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+  BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 }
 save_config() {
   umask 077
@@ -63,7 +63,7 @@ ensure_backup_repo() {
     exit 1
   fi
 
-  if [ ! -e "$BACKUP_DIR" ]; then
+  if [ ! -e "$BACKUP_DIR" ] || { [ -d "$BACKUP_DIR" ] && [ -z "$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; }; then
     mkdir -p "$(dirname "$BACKUP_DIR")"
     say "Cloning $BACKUP_REPO_URL -> $BACKUP_DIR"
     git clone "$BACKUP_REPO_URL" "$BACKUP_DIR" || {

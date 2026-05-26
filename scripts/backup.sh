@@ -7,7 +7,7 @@ CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 BIN_DIR="$SKILL_DIR/bin"
 LAST_ERROR="$SKILL_DIR/last_error.log"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 mkdir -p "$BIN_DIR"
 
 fail() { printf 'ERROR: %s\n' "$*" | tee "$LAST_ERROR" >&2; exit 1; }
@@ -18,7 +18,7 @@ load_config() {
     . "$CONFIG_FILE"
   fi
   SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
-  BACKUP_DIR="${BACKUP_DIR:-/opt/data/agent-state-backup}"
+  BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 }
 save_config() {
   umask 077
@@ -97,10 +97,7 @@ auth.json
 google_client_secret.json
 google_token.json
 keys/
-agent-state-backup/
-hermes-agent-backup-skill/
-skills/*/agent-state-backup/
-skills/*/*/agent-state-backup/
+git/
 */.agent-state-backup.conf
 */bin/gitleaks
 */bin/trufflehog
@@ -126,10 +123,7 @@ for child in list(dst.iterdir()):
     else:
         child.unlink(missing_ok=True)
 
-skip_exact = {
-    'auth.json', 'google_client_secret.json', 'google_token.json',
-    'agent-state-backup', 'hermes-agent-backup-skill',
-}
+skip_exact = {'auth.json', 'google_client_secret.json', 'google_token.json'}
 skip_parts = {'keys', '.git', '__pycache__'}
 skip_suffixes = {'.pyc', '.pyo'}
 
@@ -138,7 +132,7 @@ def should_skip(p: Path) -> bool:
     parts = rel.parts
     if not parts:
         return False
-    if parts[0] == 'agent-state-backup':
+    if parts[0] == 'git':
         return True
     if any(part in skip_parts for part in parts):
         return True

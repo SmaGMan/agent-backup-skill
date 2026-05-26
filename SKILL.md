@@ -32,6 +32,8 @@ Do not use it as a replacement for a full encrypted disk snapshot. This workflow
 
 ## Repository Layout
 
+For the public-skill/private-backup split and safe handoff sequence, see `references/public-skill-private-backup-pattern.md`.
+
 Expected public skill repository layout:
 
 ```text
@@ -71,7 +73,7 @@ Runtime files ignored by `.gitignore`:
 
 `initialize.sh`:
 
-1. Checks `/opt/data/agent-state-backup`.
+1. Checks `/opt/data/git/agent-state-backup`.
 2. If missing, prompts for the private backup repo URL and clones it there.
 3. If present but not a git repo, initializes git and links it to the private repo.
 4. If present but missing `origin`, prompts for the repo URL and adds it.
@@ -82,13 +84,13 @@ Runtime files ignored by `.gitignore`:
 
 `backup.sh`:
 
-1. Copies `/opt/data` to `/opt/data/agent-state-backup`.
+1. Copies `/opt/data` to `/opt/data/git/agent-state-backup`.
 2. Excludes the backup repo itself and known credential-only files/directories:
    - `auth.json`
    - `google_client_secret.json`
    - `google_token.json`
    - `keys/`
-   - public backup skill checkouts such as `hermes-agent-backup-skill/` and installed `agent-state-backup` skill folders
+   - `/opt/data/git/`, which contains all local git repositories including the private backup repo and public skill checkouts
 3. Removes additional standalone credential files by filename/content heuristics.
 4. Redacts `TELEGRAM_BOT_TOKEN` from `.env` and also redacts common token/key/secret/password environment variables.
 5. Runs `gitleaks`, installing it locally if missing.
@@ -103,7 +105,7 @@ Runtime files ignored by `.gitignore`:
 `restore.sh`:
 
 1. Ensures the skill is available and has local config.
-2. Ensures `/opt/data/agent-state-backup` exists and is linked to the configured private repo.
+2. Ensures `/opt/data/git/agent-state-backup` exists and is linked to the configured private repo.
 3. Shows available backup commits.
 4. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
 5. Checks out the selected commit.
@@ -126,7 +128,7 @@ Important: scanner reports are temporary local files, deleted after use, and sec
 
 ## Common Pitfalls
 
-1. **Backing up the backup repo into itself.** Always exclude `/opt/data/agent-state-backup`.
+1. **Backing up repositories into the backup repo.** Always exclude `/opt/data/git/`.
 2. **Assuming `.gitignore` is enough.** It is not. The script copies then removes/redacts and scans before commit.
 3. **Publishing local config.** Never commit `.agent-state-backup.conf` or `bin/` from the skill repo.
 4. **Restoring secrets from backup.** Secrets are intentionally excluded or redacted; re-enter them manually after restore.
@@ -135,10 +137,10 @@ Important: scanner reports are temporary local files, deleted after use, and sec
 
 ## Verification Checklist
 
-- [ ] `scripts/initialize.sh` created or linked `/opt/data/agent-state-backup` to the private repo.
+- [ ] `scripts/initialize.sh` created or linked `/opt/data/git/agent-state-backup` to the private repo.
 - [ ] `.agent-state-backup.conf` exists locally and is not tracked.
 - [ ] `scripts/backup.sh` runs successfully and pushes a commit.
 - [ ] `excluded.txt` lists removed/redacted paths without secret values.
-- [ ] `gitleaks detect --source /opt/data/agent-state-backup` returns clean.
+- [ ] `gitleaks detect --source /opt/data/git/agent-state-backup` returns clean.
 - [ ] First run completed `trufflehog filesystem` successfully.
 - [ ] `scripts/restore.sh` lists commits and preserves existing `.env` secrets during restore.
