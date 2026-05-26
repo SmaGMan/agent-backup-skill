@@ -84,6 +84,8 @@ Scanner binaries are installed locally to `./bin/` if missing. `./bin/` is ignor
 
 The restore script shows recent backup commits, asks which one to restore, checks it out, and copies files back to `/opt/data`.
 
+Restore uses `excluded.txt` from the selected backup commit as the snapshot-specific audit trail for manual follow-up. The skill repo's current `excludes.txt` is for future backup runs only, not for deciding what an old snapshot contained.
+
 Secrets are preserved from the current machine where possible. For example, if current `/opt/data/.env` has `TELEGRAM_BOT_TOKEN`, restore will not overwrite that value with a redacted or empty value from backup.
 
 After restore, manually re-add intentionally excluded secrets:

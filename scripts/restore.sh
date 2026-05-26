@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
-EXCLUDES_FILE="$SKILL_DIR/excludes.txt"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 
@@ -70,41 +69,30 @@ handle_local_changes() {
 }
 restore_files() {
   local commit="$1"
-  python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$commit" "$EXCLUDES_FILE" <<'PY'
-import fnmatch, os, shutil, subprocess, re, sys
+  python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$commit" <<'PY'
+import os, shutil, subprocess, re, sys
 from pathlib import Path
 source = Path(sys.argv[1]).resolve()
 backup = Path(sys.argv[2]).resolve()
 commit = sys.argv[3]
-excludes_file = Path(sys.argv[4])
 subprocess.check_call(['git','-C',str(backup),'checkout','--detach',commit], stdout=subprocess.DEVNULL)
-excluded = []
-if excludes_file.exists():
-    for line in excludes_file.read_text(errors='ignore').splitlines():
-        line = line.strip()
-        if line and not line.startswith('#'):
-            excluded.append(line)
+audit_items = []
+audit = backup / 'excluded.txt'
+if audit.exists():
+    for line in audit.read_text(errors='ignore').splitlines():
+        stripped = line.strip()
+        if stripped.startswith('- '):
+            audit_items.append(stripped[2:])
 secret_key_re = re.compile(r'(?i)(TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CLIENT_SECRET)')
 placeholder = 'REDACTED_BY_AGENT_STATE_BACKUP'
 
-def excluded_match(pattern: str, rel: Path) -> bool:
-    s = rel.as_posix()
-    name = rel.name
-    pat = pattern.strip().lstrip('/')
-    if not pat:
-        return False
-    if pat.endswith('/'):
-        base = pat.rstrip('/')
-        return s == base or s.startswith(base + '/') or any(part == base for part in rel.parts)
-    if '/' not in pat:
-        return name == pat or fnmatch.fnmatch(name, pat)
-    return s == pat or s.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(s, pat)
-
 def should_skip(rel: Path):
     s = rel.as_posix()
-    if s in {'.git','excludes.txt','excluded.txt'} or s.startswith('.git/'):
-        return True
-    return any(excluded_match(pattern, rel) for pattern in excluded)
+    # Restore skips backup repository metadata and backup audit/control files.
+    # Files intentionally excluded from this snapshot are reported in excluded.txt;
+    # they are normally absent from the backup tree and should not be inferred
+    # from today's skill-local excludes.txt.
+    return s in {'.git','excludes.txt','excluded.txt'} or s.startswith('.git/')
 
 def merge_env(src_env: Path, dst_env: Path):
     backup_lines = src_env.read_text(errors='ignore').splitlines()
@@ -148,6 +136,10 @@ for root, dirs, files in os.walk(backup):
             os.symlink(target, dp)
         else:
             shutil.copy2(sp, dp)
+if audit_items:
+    print('Manual follow-up from backup excluded.txt:')
+    for item in audit_items:
+        print(f'- {item}')
 PY
 }
 main() {
@@ -162,6 +154,6 @@ main() {
   commit="$(ask 'Commit hash/ref to restore' 'HEAD')"
   restore_files "$commit"
   say "Restore copied files from $commit."
-  say "Manual follow-up: re-add intentionally excluded secrets if needed: GitHub auth, model API keys, Telegram bot token, Google OAuth files, and anything listed in $BACKUP_DIR/excluded.txt; restore excludes are read from $EXCLUDES_FILE."
+  say "Manual follow-up: re-add intentionally excluded secrets if needed. The snapshot-specific audit above is read from $BACKUP_DIR/excluded.txt in the restored commit."
 }
 main "$@"

@@ -122,8 +122,8 @@ Then remove the already-backed-up path from the backup repository in a correctiv
 3. Shows available backup commits.
 4. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
 5. Checks out the selected commit.
-6. Copies files back to `/opt/data` while respecting the skill directory's `excludes.txt` and preserving current secrets in `.env`. Older backup commits may contain an obsolete `excludes.txt` file in the backup repository; restore skips that file and does not treat it as the source of truth.
-7. Prints manual steps needed to restore secrets that were intentionally excluded.
+6. Copies files back to `/opt/data` while preserving current secrets in `.env`. Restore does not use today's skill-local `excludes.txt` as a snapshot manifest; older backup commits may contain an obsolete `excludes.txt` file in the backup repository, and restore skips that control file.
+7. Reads `excluded.txt` from the selected backup commit and prints snapshot-specific manual follow-up for files that were removed/redacted during that backup.
 
 ## Cron Failure Handling
 
