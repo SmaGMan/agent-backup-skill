@@ -15,7 +15,3 @@ git/
 node_modules/
 .npm/
 .npmrc
-state.db
-sessions/20260527_072015_b37d0a.jsonl
-sessions/session_20260527_072015_b37d0a.json
-sessions/session_20260527_123618_ecd997.json

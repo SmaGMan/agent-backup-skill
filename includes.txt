@@ -15,3 +15,5 @@ skills/devops/secure-state-backups/references/hermes-token-push-and-allowed-stat
 skills/.bundled_manifest
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials-api.rkyv
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials.rkyv
+state.db
+sessions/*
