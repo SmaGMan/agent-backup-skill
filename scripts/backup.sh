@@ -9,9 +9,31 @@ LAST_ERROR="$SKILL_DIR/last_error.log"
 EXCLUDES_FILE="$SKILL_DIR/excludes.txt"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
+ADDED_COUNT=0
+MODIFIED_COUNT=0
+DELETED_COUNT=0
+NEW_SECRET_FINDINGS=0
 mkdir -p "$BIN_DIR"
 
-fail() { printf 'ERROR: %s\n' "$*" | tee "$LAST_ERROR" >&2; exit 1; }
+print_report() {
+  local status="$1" commit_msg="$2" secrets="$3" errors="$4"
+  printf 'Status: %s\n' "$status"
+  printf 'Commit: %s\n' "$commit_msg"
+  printf 'Added files: %s\n' "$ADDED_COUNT"
+  printf 'Modified files: %s\n' "$MODIFIED_COUNT"
+  printf 'Deleted files: %s\n' "$DELETED_COUNT"
+  printf 'New secrets: %s\n' "$secrets"
+  printf 'Errors: %s\n' "$errors"
+}
+fail() {
+  local msg="$*" secrets="unknown"
+  if [ "${NEW_SECRET_FINDINGS:-0}" -gt 0 ]; then
+    secrets="yes"
+  fi
+  printf 'ERROR: %s\n' "$msg" > "$LAST_ERROR"
+  print_report "error" "not created" "$secrets" "$msg"
+  exit 1
+}
 say() { printf '%s\n' "$*"; }
 load_config() {
   if [ -f "$CONFIG_FILE" ]; then
@@ -58,7 +80,7 @@ ensure_tool() {
     printf '%s\n' "$BIN_DIR/$name"
     return 0
   fi
-  say "Installing $name locally into $BIN_DIR..." >&2
+  # Keep cron reports concise; only the final report should be printed on success.
   url="$(asset_url "$repo" "$pattern")" || fail "could not find release asset for $name"
   tmp="$(mktemp -d)"
   curl -fsSL "$url" -o "$tmp/$name.tar.gz" || fail "download failed for $name"
@@ -231,12 +253,80 @@ exclude_patterns = []
 secret_file_re = re.compile(r'(^|[._-])(token|secret|credential|credentials|private[_-]?key|api[_-]?key)([._-]|$)', re.I)
 private_key_re = re.compile(rb'-----BEGIN [A-Z ]*PRIVATE KEY-----')
 text_exts = {'.env','.yaml','.yml','.json','.toml','.ini','.conf','.cfg','.txt','.md'}
+secret_key_re = re.compile(r'(token|secret|password|private_key|private-key|api_key|api-key|access_key|access-key|client_secret|client-secret)', re.I)
 assignment_re = re.compile(r'(?im)^([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CLIENT_SECRET)[A-Z0-9_]*\s*=\s*)(.*)$')
-yaml_re = re.compile(r'(?im)^(\s*[A-Za-z0-9_.-]*(?:token|secret|password|private_key|api_key|access_key|client_secret)[A-Za-z0-9_.-]*\s*:\s*)(.+)$')
-json_re = re.compile(r'(?i)("[^"]*(?:token|secret|password|private_key|api_key|access_key|client_secret)[^"]*"\s*:\s*)"[^"]*"')
+yaml_re = re.compile(r'(?im)^(\s*[A-Za-z0-9_.-]*(?:token|secret|password|private[_-]?key|api[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*\s*:\s*)(.+)$')
+json_re = re.compile(r'(?i)("[^"]*(?:token|secret|password|private[_-]?key|api[_-]?key|access[_-]?key|client[_-]?secret)[^"]*"\s*:\s*)"[^"]*"')
+explicit_env_re = re.compile(r'(?im)^((?:TELEGRAM_BOT_TOKEN|GITHUB_TOKEN|GH_TOKEN)\s*=\s*).+$')
 
 def rel(p): return str(p.relative_to(root))
 def is_binary(data): return b'\0' in data[:4096]
+def clean_value(value): return value.strip().strip('"').strip("'")
+def is_real_value(value):
+    v = clean_value(value)
+    return bool(v and v != 'REDACTED_BY_AGENT_STATE_BACKUP' and v not in {'{}', '[]', 'null', 'None', '~'})
+def env_redaction_paths(text):
+    paths = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or '=' not in stripped:
+            continue
+        key, value = stripped.split('=', 1)
+        key = key.strip()
+        if key in {'TELEGRAM_BOT_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'} or secret_key_re.search(key):
+            if is_real_value(value):
+                paths.append(key)
+    return paths
+def yaml_redaction_paths(text):
+    paths, stack = [], []
+    key_value_re = re.compile(r'^(\s*)([A-Za-z0-9_.-]+)\s*:\s*(.*)$')
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        m = key_value_re.match(line)
+        if not m:
+            continue
+        indent = len(m.group(1).replace('\t', '  '))
+        key = m.group(2)
+        value = m.group(3).split('#', 1)[0].strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        current = [item[1] for item in stack] + [key]
+        if secret_key_re.search(key) and is_real_value(value):
+            paths.append('.'.join(current))
+        if value == '' or value in {'|', '>'}:
+            stack.append((indent, key))
+    return paths
+def json_redaction_paths(text):
+    paths = []
+    def walk(obj, prefix=''):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                path = f'{prefix}.{key}' if prefix else str(key)
+                if secret_key_re.search(str(key)) and not isinstance(value, (dict, list)) and is_real_value(str(value)):
+                    paths.append(path)
+                walk(value, path)
+        elif isinstance(obj, list):
+            for i, value in enumerate(obj):
+                walk(value, f'{prefix}[{i}]')
+    try:
+        walk(json.loads(text))
+    except Exception:
+        pass
+    return paths
+def redaction_paths(name, suffix, text):
+    found = []
+    if name == '.env' or suffix in {'.env', '.conf', '.cfg', '.ini', '.txt', '.md'}:
+        found.extend(env_redaction_paths(text))
+    if suffix in {'.yaml', '.yml'} or name in {'config.yaml', 'config.yml'}:
+        found.extend(yaml_redaction_paths(text))
+    if suffix == '.json':
+        found.extend(json_redaction_paths(text))
+    if not found:
+        found.extend(env_redaction_paths(text))
+        found.extend(yaml_redaction_paths(text))
+        found.extend(json_redaction_paths(text))
+    return sorted(set(found))
 for p in list(root.rglob('*')):
     if not p.is_file() or '.git' in p.parts:
         continue
@@ -256,13 +346,18 @@ for p in list(root.rglob('*')):
             continue
         text = data.decode('utf-8', errors='ignore')
         original = text
+        paths = redaction_paths(name, p.suffix.lower(), text)
         text = assignment_re.sub(lambda m: m.group(1) + 'REDACTED_BY_AGENT_STATE_BACKUP', text)
         text = yaml_re.sub(lambda m: m.group(1) + 'REDACTED_BY_AGENT_STATE_BACKUP', text)
         text = json_re.sub(lambda m: m.group(1) + '"REDACTED_BY_AGENT_STATE_BACKUP"', text)
-        text = re.sub(r'(?im)^((?:TELEGRAM_BOT_TOKEN|GITHUB_TOKEN|GH_TOKEN)\s*=\s*).+$', r'\1REDACTED_BY_AGENT_STATE_BACKUP', text)
+        text = explicit_env_re.sub(r'\1REDACTED_BY_AGENT_STATE_BACKUP', text)
         if text != original:
             p.write_text(text, encoding='utf-8')
-            log.append(f"redacted secret-like assignments in: {r}")
+            if paths:
+                for param in paths:
+                    log.append(f"redacted secret-like assignment: {r} :: {param}")
+            else:
+                log.append(f"redacted secret-like assignment: {r} :: unknown parameter")
 with (root/'excluded.txt').open('a', encoding='utf-8') as f:
     if log:
         import datetime
@@ -291,6 +386,25 @@ except Exception as e:
     raise SystemExit(f"could not parse gitleaks report: {e}")
 unresolved=[]; changed=[]
 assign_re = re.compile(r'(?i)^\s*[^=:#]{0,120}(token|secret|password|api[_-]?key|private[_-]?key|access[_-]?key)[^=:#]{0,80}[=:#]')
+key_re = re.compile(r'^\s*["\']?([A-Za-z0-9_.-]*(?:token|secret|password|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*)["\']?\s*[=:#]', re.I)
+def finding_location(file, text, finding, secret):
+    lines = text.splitlines()
+    start = int(finding.get('StartLine') or finding.get('startLine') or 0)
+    candidates = []
+    if start and 1 <= start <= len(lines):
+        candidates.append((start, lines[start-1]))
+    if secret:
+        for i, line in enumerate(lines, 1):
+            if secret in line:
+                candidates.append((i, line))
+                break
+    for line_no, line in candidates:
+        m = key_re.search(line)
+        if m:
+            return f"{file} :: {m.group(1)}"
+        if line_no:
+            return f"{file} :: line {line_no}"
+    return f"{file} :: unknown parameter"
 for finding in findings:
     file = finding.get('File') or finding.get('file')
     secret = finding.get('Secret') or finding.get('secret')
@@ -319,18 +433,18 @@ for finding in findings:
             continue
     if text != original:
         p.write_text(text, encoding='utf-8')
-        changed.append(file)
+        changed.append(finding_location(file, original, finding, secret))
 if changed:
     with (root/'excluded.txt').open('a', encoding='utf-8') as f:
         f.write('\n## gitleaks auto-redaction\n')
-        for file in sorted(set(changed)):
-            f.write(f'- redacted scanner finding in: {file}\n')
+        for item in sorted(set(changed)):
+            f.write(f'- redacted scanner finding: {item}\n')
 if unresolved:
     raise SystemExit('unresolved scanner findings: ' + ', '.join(sorted(set(unresolved))))
 PY
 }
 run_gitleaks_clean() {
-  local gitleaks report status
+  local gitleaks report status findings_count
   gitleaks="$(ensure_gitleaks)"
   report="$(mktemp)"
   trap 'rm -f "$report"' RETURN
@@ -343,6 +457,15 @@ run_gitleaks_clean() {
     trap - RETURN
     return 0
   fi
+  findings_count="$(python3 - "$report" <<'PY'
+import json, sys
+try:
+    print(len(json.load(open(sys.argv[1], encoding='utf-8'))))
+except Exception:
+    print(1)
+PY
+)"
+  NEW_SECRET_FINDINGS=$((NEW_SECRET_FINDINGS + findings_count))
   redact_gitleaks_findings "$report" || fail "gitleaks found secrets that could not be safely redacted"
   rm -f "$report" /tmp/agent_state_backup_gitleaks.out
   trap - RETURN
@@ -391,6 +514,7 @@ if unresolved:
     raise SystemExit('unresolved trufflehog findings outside allowed state/cache paths: ' + ', '.join(sorted(set(unresolved))))
 PY
     then
+      NEW_SECRET_FINDINGS=1
       rm -f "$out" /tmp/agent_state_backup_trufflehog.err
       fail "trufflehog found possible secrets outside allowed state/cache paths"
     fi
@@ -401,15 +525,35 @@ PY
 }
 commit_and_push() {
   git -C "$BACKUP_DIR" add -A
+  local counts
+  counts="$(git -C "$BACKUP_DIR" diff --cached --name-status | python3 -c 'import sys
+added = modified = deleted = 0
+for line in sys.stdin:
+    status = line.split("\t", 1)[0]
+    code = status[:1]
+    if code == "A":
+        added += 1
+    elif code == "D":
+        deleted += 1
+    else:
+        modified += 1
+print(added, modified, deleted)')"
+  read -r ADDED_COUNT MODIFIED_COUNT DELETED_COUNT <<< "$counts"
   if git -C "$BACKUP_DIR" diff --cached --quiet; then
-    say "No backup changes to commit."
     rm -f "$LAST_ERROR"
+    print_report "ok" "no changes" "no" "no"
     return 0
   fi
-  local msg
+  local msg commit_out push_out token cred
   msg="backup $(date -u '+%Y-%m-%d %H:%M UTC')"
-  git -C "$BACKUP_DIR" commit -m "$msg"
-  local token cred
+  commit_out="$(mktemp)"
+  push_out="$(mktemp)"
+  if ! git -C "$BACKUP_DIR" commit --quiet -m "$msg" >"$commit_out" 2>&1; then
+    local err
+    err="$(tail -n 5 "$commit_out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    rm -f "$commit_out" "$push_out"
+    fail "git commit failed: $err"
+  fi
   token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -z "$token" ] && [ -f "$SOURCE_DIR/.env" ]; then
     token="$(python3 - "$SOURCE_DIR/.env" <<'PY'
@@ -431,12 +575,26 @@ PY
   fi
   if [ -n "$token" ]; then
     cred="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-    git -C "$BACKUP_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $cred" push -u origin HEAD
+    if ! git -C "$BACKUP_DIR" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $cred" push --quiet -u origin HEAD >"$push_out" 2>&1; then
+      local err
+      err="$(tail -n 5 "$push_out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+      rm -f "$commit_out" "$push_out"
+      fail "git push failed: $err"
+    fi
   else
-    git -C "$BACKUP_DIR" push -u origin HEAD
+    if ! git -C "$BACKUP_DIR" push --quiet -u origin HEAD >"$push_out" 2>&1; then
+      local err
+      err="$(tail -n 5 "$push_out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+      rm -f "$commit_out" "$push_out"
+      fail "git push failed: $err"
+    fi
   fi
-  rm -f "$LAST_ERROR"
-  say "Backup pushed: $msg"
+  rm -f "$commit_out" "$push_out" "$LAST_ERROR"
+  if [ "$NEW_SECRET_FINDINGS" -gt 0 ]; then
+    print_report "ok" "$msg" "yes ($NEW_SECRET_FINDINGS scanner findings auto-redacted/allowed)" "no"
+  else
+    print_report "ok" "$msg" "no" "no"
+  fi
 }
 main() {
   load_config

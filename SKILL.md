@@ -90,19 +90,22 @@ Runtime files ignored by `.gitignore`:
 `backup.sh`:
 
 1. Copies `/opt/data` to `/opt/data/git/agent-state-backup`.
-2. Excludes paths from `excludes.txt` in the skill directory. This file is the persistent source of truth for backup exclusions and currently excludes known credential-only files/directories and `/opt/data/git/`:
+2. Excludes paths from `excludes.txt` in the skill directory. This file is the persistent source of truth for backup exclusions and currently excludes known credential-only files/directories, local git repositories, and rebuildable dependency/cache directories:
    - `auth.json`
    - `google_client_secret.json`
    - `google_token.json`
    - `keys/`
-   - `/opt/data/git/`, which contains all local git repositories including the private backup repo and public skill checkouts
+   - `git/`, which contains all local git repositories including the private backup repo and public skill checkouts
+   - `node_modules/`, matching any `node_modules` directory at any depth
+   - `.npm/`, npm cache/logs that can be rebuilt
+   - `.npmrc`, npm config that may contain auth tokens for private registries
 3. Removes additional standalone credential files by filename/content heuristics.
 4. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
 5. Runs `gitleaks`, installing it locally if missing.
 6. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
 7. Automatically redacts scanner-detected secrets when safe to do so.
 8. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-9. Writes non-secret audit details to `excluded.txt` in the backup repository. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
+9. Writes non-secret audit details to `excluded.txt` in the backup repository. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
 10. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
 
 To add something that was mistakenly backed up or should be skipped going forward, run:
@@ -125,9 +128,17 @@ Then remove the already-backed-up path from the backup repository in a correctiv
 6. Copies files back to `/opt/data` while preserving current secrets in `.env`. Restore does not use today's skill-local `excludes.txt` as a snapshot manifest; older backup commits may contain an obsolete `excludes.txt` file in the backup repository, and restore skips that control file.
 7. Reads `excluded.txt` from the selected backup commit and prints snapshot-specific manual follow-up for files that were removed/redacted during that backup.
 
-## Cron Failure Handling
+## Cron Report Format and Failure Handling
 
-The cron job should run `backup.sh` with `--no-agent`. Empty stdout means success/silent. Any non-empty stdout or non-zero exit is delivered as a notification. If backup needs a human decision or cannot safely redact a secret, the script exits non-zero and writes a local `last_error.log` next to the skill config. When the user later asks about backups, inspect that file and help resolve the issue before re-running `backup.sh`.
+The cron job should run `backup.sh` as a no-agent script. The script prints a concise report only; it must not list copied file paths. The report should stay under 30 lines and include:
+
+- status;
+- commit message, or `no changes` / `not created`;
+- counts of added, modified, and deleted files;
+- whether new scanner findings were detected;
+- whether errors occurred.
+
+If backup needs a human decision or cannot safely redact a secret, the script exits non-zero and writes a local `last_error.log` next to the skill config. When the user later asks about backups, inspect that file and help resolve the issue before re-running `backup.sh`.
 
 ## Security Model
 
@@ -154,7 +165,7 @@ Important: scanner reports are temporary local files, deleted after use, and sec
 - [ ] `.agent-state-backup.conf` exists locally and is not tracked.
 - [ ] `scripts/backup.sh` runs successfully and pushes a commit.
 - [ ] `excluded.txt` lists removed/redacted paths without secret values.
-- [ ] `excludes.txt` exists in the skill directory, is tracked with the skill, is not present in new backup commits, and does not exclude user-requested state directories such as `sessions/`.
+- [ ] `excludes.txt` exists in the skill directory, is tracked with the skill, and does not exclude user-requested state directories such as `sessions/`.
 - [ ] `gitleaks detect --source /opt/data/git/agent-state-backup` returns clean.
 - [ ] First run completed `trufflehog filesystem` successfully.
 - [ ] `scripts/restore.sh` lists commits and preserves existing `.env` secrets during restore.
