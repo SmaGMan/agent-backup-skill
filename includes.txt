@@ -19,3 +19,6 @@ state.db
 sessions/*
 .cache/
 tirith-threatdb.dat
+state.db-wal
+state.db-shm
+.local/share/tirith/
