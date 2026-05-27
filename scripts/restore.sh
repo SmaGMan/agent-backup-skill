@@ -150,12 +150,56 @@ placeholder = 'REDACTED_BY_AGENT_STATE_BACKUP'
 secret_key_re = re.compile(r'(?i)(TOKEN|SECRET|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CLIENT_SECRET)')
 assign_re = re.compile(r'^(\s*["\']?)([A-Za-z0-9_.-]+)(["\']?\s*[:=]\s*)(.*?)(\s*)$')
 audit_items = []
+audit_secret_paths = []
+restored_secret_paths = []
+unresolved_secret_paths = []
+other_redacted_paths = []
 audit = snapshot / 'excluded.txt'
+
+def normalize_audit_file(file: str) -> str:
+    file = file.strip()
+    try:
+        path = Path(file)
+        if path.is_absolute():
+            return str(path.resolve().relative_to(snapshot))
+    except Exception:
+        pass
+    return file
+
+def canonical_secret_path(rel, param):
+    rel_s = str(rel).replace('\\', '/')
+    param = str(param).strip()
+    for audit_rel, audit_param in audit_secret_paths:
+        if audit_rel == rel_s and (audit_param == param or audit_param.endswith('.' + param) or audit_param.endswith(':: ' + param)):
+            return f'{audit_rel} :: {audit_param}'
+    return f'{rel_s} :: {param}'
+
+def add_unique(seq, item):
+    if item not in seq:
+        seq.append(item)
+
+def is_runtime_secret_path(item: str) -> bool:
+    rel = item.split(' :: ', 1)[0]
+    name = Path(rel).name
+    if rel in {'.env', 'config.yaml', 'config.yml'}:
+        return True
+    if rel.startswith(('keys/', 'secrets/', 'credentials/')):
+        return True
+    if name in {'auth.json', 'google_client_secret.json', 'google_token.json', '.npmrc'}:
+        return True
+    if re.search(r'(?i)(token|secret|credential|private[_-]?key|api[_-]?key)', name):
+        return True
+    return False
+
 if audit.exists():
     for line in audit.read_text(errors='ignore').splitlines():
         stripped = line.strip()
         if stripped.startswith('- '):
-            audit_items.append(stripped[2:])
+            item = stripped[2:]
+            audit_items.append(item)
+            m = re.match(r'(?:redacted secret-like assignment|redacted scanner finding):\s+(.+?)\s+::\s+(.+)$', item)
+            if m:
+                audit_secret_paths.append((normalize_audit_file(m.group(1)), m.group(2).strip()))
 
 def should_skip(rel: Path):
     s = rel.as_posix()
@@ -175,43 +219,50 @@ def merge_env(src_env: Path, dst_env: Path):
     current = parse_env_lines(current_lines)
     seen = set()
     out=[]
-    preserved = 0
+    restored=[]
+    unresolved=[]
     for line in backup_lines:
         if '=' not in line or line.lstrip().startswith('#'):
             out.append(line); continue
         k,v=line.split('=',1)
         seen.add(k)
-        if secret_key_re.search(k) and k in current and current[k] and (v in {'', placeholder} or placeholder in v):
+        secretish = bool(secret_key_re.search(k))
+        redacted = v in {'', placeholder} or placeholder in v
+        if secretish and redacted and k in current and current[k]:
             out.append(f'{k}={current[k]}')
-            preserved += 1
+            restored.append(canonical_secret_path('.env', k))
         else:
             out.append(line)
+            if secretish and redacted:
+                unresolved.append(canonical_secret_path('.env', k))
     for line in current_lines:
         if '=' not in line or line.lstrip().startswith('#'):
             continue
         k, _ = line.split('=', 1)
         if k not in seen and secret_key_re.search(k):
             out.append(line)
-            preserved += 1
-    return '\n'.join(out)+'\n', preserved
+            restored.append(f'.env :: {k} (preserved current-only)')
+    return '\n'.join(out)+'\n', restored, unresolved
 
-def preserve_redacted_values(backup_text: str, current_text: str):
+def preserve_redacted_values(rel: Path, backup_text: str, current_text: str):
     current_by_key = {}
     for line in current_text.splitlines():
         m = assign_re.match(line)
         if m:
             current_by_key[m.group(2).lower()] = line
-    out=[]; preserved=0
-    for line in backup_text.splitlines():
+    out=[]; restored=[]; unresolved=[]
+    for line_no, line in enumerate(backup_text.splitlines(), 1):
         if placeholder not in line:
             out.append(line); continue
         m = assign_re.match(line)
         if m and m.group(2).lower() in current_by_key:
             out.append(current_by_key[m.group(2).lower()])
-            preserved += 1
+            restored.append(canonical_secret_path(rel, m.group(2)))
         else:
             out.append(line)
-    return '\n'.join(out) + ('\n' if backup_text.endswith('\n') else ''), preserved
+            param = m.group(2) if m else f'line {line_no}'
+            unresolved.append(canonical_secret_path(rel, param))
+    return '\n'.join(out) + ('\n' if backup_text.endswith('\n') else ''), restored, unresolved
 
 def is_text_file(path: Path):
     if path.name == '.env':
@@ -247,8 +298,31 @@ for root, dirs, names in os.walk(snapshot):
 
 added=sum(1 for _,_,dp in files if not dp.exists() and not dp.is_symlink())
 overwritten=len(files)-added
-preserved_redacted=0
 safety_root = source / 'restore-safety-snapshots' / time.strftime('%Y%m%d_%H%M%S')
+
+def classify_secret_restore(sp: Path, rel: Path, dp: Path):
+    if rel == Path('.env'):
+        _, restored, unresolved = merge_env(sp, dp)
+        return restored, unresolved
+    if not is_text_file(sp):
+        return [], []
+    text = sp.read_text(errors='ignore')
+    if placeholder not in text:
+        return [], []
+    current = dp.read_text(errors='ignore') if dp.exists() and dp.is_file() else ''
+    _, restored, unresolved = preserve_redacted_values(rel, text, current)
+    return restored, unresolved
+
+for sp, rel, dp in files:
+    restored, unresolved = classify_secret_restore(sp, rel, dp)
+    for item in restored:
+        add_unique(restored_secret_paths, item)
+    for item in unresolved:
+        if is_runtime_secret_path(item):
+            add_unique(unresolved_secret_paths, item)
+        else:
+            add_unique(other_redacted_paths, item)
+
 if dry_run:
     print('Restore dry-run summary:')
     print(f'- commit: {commit}')
@@ -267,8 +341,7 @@ else:
             copy_existing_to_safety(dp, rel, safety_root)
         dp.parent.mkdir(parents=True, exist_ok=True)
         if rel == Path('.env'):
-            text, n = merge_env(sp, dp)
-            preserved_redacted += n
+            text, _, _ = merge_env(sp, dp)
             dp.write_text(text, encoding='utf-8')
             continue
         if sp.is_symlink():
@@ -280,8 +353,7 @@ else:
         elif is_text_file(sp):
             text = sp.read_text(errors='ignore')
             if placeholder in text and dp.exists() and dp.is_file():
-                text, n = preserve_redacted_values(text, dp.read_text(errors='ignore'))
-                preserved_redacted += n
+                text, _, _ = preserve_redacted_values(rel, text, dp.read_text(errors='ignore'))
             if dp.exists() and dp.is_dir():
                 raise RuntimeError(f'refusing to replace directory with file: {dp}')
             dp.write_text(text, encoding='utf-8')
@@ -299,13 +371,38 @@ else:
     print('- deleted: 0')
     if overwritten:
         print(f'- overwritten-file safety snapshot: {safety_root}')
-    print(f'- preserved redacted/current secret values: {preserved_redacted}')
+print('Secret restore details:')
+print(f'- restored/preserved secret values: {len(restored_secret_paths)}')
+for item in restored_secret_paths[:80]:
+    print(f'  - restored: {item}')
+if len(restored_secret_paths) > 80:
+    print(f'  - ... {len(restored_secret_paths)-80} more restored items omitted')
+print(f'- secrets requiring manual action: {len(unresolved_secret_paths)}')
+for item in unresolved_secret_paths[:80]:
+    print(f'  - manual: {item}')
+if len(unresolved_secret_paths) > 80:
+    print(f'  - ... {len(unresolved_secret_paths)-80} more manual items omitted')
+if other_redacted_paths:
+    print(f'- other redacted placeholders left as-is: {len(other_redacted_paths)}')
+    for item in other_redacted_paths[:20]:
+        print(f'  - informational: {item}')
+    if len(other_redacted_paths) > 20:
+        print(f'  - ... {len(other_redacted_paths)-20} more informational items omitted')
+if unresolved_secret_paths:
+    print('Manual steps:')
+    print('  - Open each listed file/path in the restored SOURCE_DIR.')
+    print('  - Re-enter the real value from the original provider or password manager.')
+    print(f'  - Previous overwritten originals, if any, are in: {safety_root}')
+elif other_redacted_paths:
+    print('Manual steps:')
+    print('  - No runtime secret needs manual action.')
+    print('  - Informational placeholders are from docs/sessions/history; ignore unless you specifically need the original historical text.')
 if audit_items:
-    print('Manual follow-up from backup excluded.txt:')
+    print('Backup redaction audit from excluded.txt:')
     for item in audit_items[:50]:
         print(f'- {item}')
     if len(audit_items) > 50:
-        print(f'- ... {len(audit_items)-50} more items omitted')
+        print(f'- ... {len(audit_items)-50} more audit items omitted')
 PY
   local restore_status=$?
   set -e
