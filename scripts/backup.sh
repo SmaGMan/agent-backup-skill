@@ -7,6 +7,7 @@ CONFIG_FILE="$SKILL_DIR/.agent-state-backup.conf"
 BIN_DIR="$SKILL_DIR/bin"
 LAST_ERROR="$SKILL_DIR/last_error.log"
 EXCLUDES_FILE="$SKILL_DIR/excludes.txt"
+INCLUDES_FILE="$SKILL_DIR/includes.txt"
 SOURCE_DIR="${SOURCE_DIR:-/opt/data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/data/git/agent-state-backup}"
 ADDED_COUNT=0
@@ -129,12 +130,38 @@ git/
 */.agent-state-backup.conf
 */bin/gitleaks
 */bin/trufflehog
-skills/devops/agent-state-backup/excludes.txt
+EOF
+}
+ensure_includes_file() {
+  if [ -f "$INCLUDES_FILE" ]; then
+    return 0
+  fi
+  cat > "$INCLUDES_FILE" <<'EOF'
+# Persistent force-include patterns for agent-state-backup.
+# Values are relative to SOURCE_DIR (/opt/data by default).
+# These paths override excludes and backup-time secret-like file removal.
+# Use only for user-approved false positives; real secrets should remain excluded/redacted.
 EOF
 }
 add_exclude_patterns() {
   ensure_excludes_file
   python3 - "$EXCLUDES_FILE" "$@" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+new = [p.strip() for p in sys.argv[2:] if p.strip()]
+lines = path.read_text(errors='ignore').splitlines() if path.exists() else []
+existing = {line.strip() for line in lines if line.strip() and not line.lstrip().startswith('#')}
+with path.open('a', encoding='utf-8') as f:
+    for item in new:
+        if item not in existing:
+            f.write(item + '\n')
+            existing.add(item)
+PY
+}
+add_include_patterns() {
+  ensure_includes_file
+  python3 - "$INCLUDES_FILE" "$@" <<'PY'
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -157,9 +184,21 @@ handle_args() {
       say "Updated exclude patterns in $EXCLUDES_FILE"
       exit 0
       ;;
+    --add-include)
+      shift
+      [ "$#" -gt 0 ] || fail "usage: $0 --add-include PATH [PATH...]"
+      add_include_patterns "$@"
+      say "Updated include patterns in $INCLUDES_FILE"
+      exit 0
+      ;;
     --show-excludes)
       ensure_excludes_file
       cat "$EXCLUDES_FILE"
+      exit 0
+      ;;
+    --show-includes)
+      ensure_includes_file
+      cat "$INCLUDES_FILE"
       exit 0
       ;;
   esac
@@ -169,12 +208,14 @@ mirror_source() {
   mkdir -p "$BACKUP_DIR"
   [ -d "$BACKUP_DIR/.git" ] || fail "$BACKUP_DIR is not initialized as a git repository. Run initialize.sh first."
   ensure_excludes_file
-  python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$EXCLUDES_FILE" <<'PY'
+  ensure_includes_file
+  python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$EXCLUDES_FILE" "$INCLUDES_FILE" <<'PY'
 import fnmatch, os, shutil, sys, stat
 from pathlib import Path
 src = Path(sys.argv[1]).resolve()
 dst = Path(sys.argv[2]).resolve()
 excludes_file = Path(sys.argv[3])
+includes_file = Path(sys.argv[4])
 if src == dst or not str(dst).startswith(str(src) + os.sep):
     pass
 # Clean destination except .git
@@ -189,11 +230,17 @@ for child in list(dst.iterdir()):
 skip_parts = {'.git', '__pycache__'}
 skip_suffixes = {'.pyc', '.pyo'}
 patterns = []
+include_patterns = []
 if excludes_file.exists():
     for line in excludes_file.read_text(errors='ignore').splitlines():
         line = line.strip()
         if line and not line.startswith('#'):
             patterns.append(line)
+if includes_file.exists():
+    for line in includes_file.read_text(errors='ignore').splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            include_patterns.append(line)
 
 def pattern_matches(pattern: str, rel: Path, is_dir: bool) -> bool:
     s = rel.as_posix()
@@ -213,10 +260,18 @@ def should_skip(p: Path) -> bool:
     parts = rel.parts
     if not parts:
         return False
-    if any(part in skip_parts for part in parts):
+    # .git internals and bytecode are always skipped; includes are for backup false positives, not VCS/cache internals.
+    if any(part in skip_parts for part in parts) or p.suffix in skip_suffixes:
         return True
-    if p.suffix in skip_suffixes:
-        return True
+    if any(pattern_matches(pattern, rel, p.is_dir()) for pattern in include_patterns):
+        return False
+    if p.is_dir():
+        s = rel.as_posix().rstrip('/')
+        # Keep walking directories that contain a force-included descendant even if the directory itself matches an exclude.
+        for pattern in include_patterns:
+            pat = pattern.strip().lstrip('/').rstrip('/')
+            if pat and (pat == s or pat.startswith(s + '/')):
+                return False
     return any(pattern_matches(pattern, rel, p.is_dir()) for pattern in patterns)
 
 for root, dirs, files in os.walk(src):
@@ -243,13 +298,21 @@ PY
 }
 sanitation_pass() {
   ensure_excludes_file
-  python3 - "$BACKUP_DIR" "$EXCLUDES_FILE" <<'PY'
+  ensure_includes_file
+  python3 - "$BACKUP_DIR" "$EXCLUDES_FILE" "$INCLUDES_FILE" <<'PY'
 import os, re, json, shutil, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 excludes_file = Path(sys.argv[2])
+includes_file = Path(sys.argv[3])
 log = []
 exclude_patterns = []
+include_patterns = []
+if includes_file.exists():
+    for line in includes_file.read_text(errors='ignore').splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            include_patterns.append(line)
 secret_file_re = re.compile(r'(^|[._-])(token|secret|credential|credentials|private[_-]?key|api[_-]?key)([._-]|$)', re.I)
 private_key_re = re.compile(rb'-----BEGIN [A-Z ]*PRIVATE KEY-----')
 text_exts = {'.env','.yaml','.yml','.json','.toml','.ini','.conf','.cfg','.txt','.md'}
@@ -260,6 +323,16 @@ json_re = re.compile(r'(?i)("[^"]*(?:token|secret|password|private[_-]?key|api[_
 explicit_env_re = re.compile(r'(?im)^((?:TELEGRAM_BOT_TOKEN|GITHUB_TOKEN|GH_TOKEN)\s*=\s*).+$')
 
 def rel(p): return str(p.relative_to(root))
+def pattern_matches(pattern: str, relpath: str) -> bool:
+    pat = pattern.strip().lstrip('/')
+    if not pat:
+        return False
+    if pat.endswith('/'):
+        base = pat.rstrip('/')
+        return relpath == base or relpath.startswith(base + '/')
+    return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or __import__('fnmatch').fnmatch(relpath, pat)
+def is_force_included(relpath: str) -> bool:
+    return any(pattern_matches(pattern, relpath) for pattern in include_patterns)
 def is_binary(data): return b'\0' in data[:4096]
 def clean_value(value): return value.strip().strip('"').strip("'")
 def is_real_value(value):
@@ -336,6 +409,8 @@ for p in list(root.rglob('*')):
         data = p.read_bytes()
     except Exception:
         continue
+    if is_force_included(r):
+        continue
     if private_key_re.search(data) or (secret_file_re.search(name) and name not in {'.env','config.yaml','config.yml'}):
         p.unlink(missing_ok=True)
         log.append(f"removed credential-like file: {r}")
@@ -376,10 +451,24 @@ PY
 }
 redact_gitleaks_findings() {
   local report="$1"
-  python3 - "$BACKUP_DIR" "$report" <<'PY'
+  python3 - "$BACKUP_DIR" "$report" "$INCLUDES_FILE" <<'PY'
 import json, re, sys
 from pathlib import Path
-root = Path(sys.argv[1]); report = Path(sys.argv[2])
+root = Path(sys.argv[1]); report = Path(sys.argv[2]); includes_file = Path(sys.argv[3])
+include_patterns=[]
+if includes_file.exists():
+    include_patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
+def pattern_matches(pattern: str, relpath: str) -> bool:
+    import fnmatch
+    pat = pattern.strip().lstrip('/')
+    if not pat:
+        return False
+    if pat.endswith('/'):
+        base = pat.rstrip('/')
+        return relpath == base or relpath.startswith(base + '/')
+    return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
+def is_force_included(relpath: str) -> bool:
+    return any(pattern_matches(pattern, relpath) for pattern in include_patterns)
 try:
     findings = json.loads(report.read_text() or '[]')
 except Exception as e:
@@ -410,6 +499,8 @@ for finding in findings:
     secret = finding.get('Secret') or finding.get('secret')
     if not file:
         unresolved.append('unknown-file')
+        continue
+    if is_force_included(file):
         continue
     p = (root / file).resolve()
     if not str(p).startswith(str(root.resolve())) or not p.exists() or not p.is_file():
@@ -443,6 +534,37 @@ if unresolved:
     raise SystemExit('unresolved scanner findings: ' + ', '.join(sorted(set(unresolved))))
 PY
 }
+gitleaks_unincluded_count() {
+  local report="$1"
+  python3 - "$report" "$INCLUDES_FILE" <<'PY'
+import fnmatch, json, sys
+from pathlib import Path
+report = Path(sys.argv[1]); includes_file = Path(sys.argv[2])
+patterns=[]
+if includes_file.exists():
+    patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
+def matches(pattern, relpath):
+    pat = pattern.strip().lstrip('/')
+    if not pat:
+        return False
+    if pat.endswith('/'):
+        base = pat.rstrip('/')
+        return relpath == base or relpath.startswith(base + '/')
+    return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
+def included(relpath):
+    return any(matches(p, relpath) for p in patterns)
+try:
+    findings = json.loads(report.read_text() or '[]')
+except Exception:
+    print(1); raise SystemExit
+count = 0
+for finding in findings:
+    file = finding.get('File') or finding.get('file') or ''
+    if not file or not included(file):
+        count += 1
+print(count)
+PY
+}
 run_gitleaks_clean() {
   local gitleaks report status findings_count
   gitleaks="$(ensure_gitleaks)"
@@ -457,20 +579,22 @@ run_gitleaks_clean() {
     trap - RETURN
     return 0
   fi
-  findings_count="$(python3 - "$report" <<'PY'
-import json, sys
-try:
-    print(len(json.load(open(sys.argv[1], encoding='utf-8'))))
-except Exception:
-    print(1)
-PY
-)"
+  findings_count="$(gitleaks_unincluded_count "$report")"
+  if [ "$findings_count" -eq 0 ]; then
+    rm -f /tmp/agent_state_backup_gitleaks.out "$report"
+    trap - RETURN
+    return 0
+  fi
   NEW_SECRET_FINDINGS=$((NEW_SECRET_FINDINGS + findings_count))
   redact_gitleaks_findings "$report" || fail "gitleaks found secrets that could not be safely redacted"
   rm -f "$report" /tmp/agent_state_backup_gitleaks.out
   trap - RETURN
-  "$gitleaks" detect --source "$BACKUP_DIR" --no-git --redact >/tmp/agent_state_backup_gitleaks_final.out 2>&1 || fail "gitleaks still reports secrets after redaction"
-  rm -f /tmp/agent_state_backup_gitleaks_final.out
+  local final_report final_count
+  final_report="$(mktemp)"
+  "$gitleaks" detect --source "$BACKUP_DIR" --no-git --report-format json --report-path "$final_report" >/tmp/agent_state_backup_gitleaks_final.out 2>&1 || true
+  final_count="$(gitleaks_unincluded_count "$final_report")"
+  rm -f "$final_report" /tmp/agent_state_backup_gitleaks_final.out
+  [ "$final_count" -eq 0 ] || fail "gitleaks still reports non-included secrets after redaction"
 }
 run_trufflehog_once() {
   if [ "${TRUFFLEHOG_FIRST_PUSH_DONE:-false}" = "true" ]; then
@@ -484,11 +608,25 @@ run_trufflehog_once() {
   status=$?
   set -e
   if [ -s "$out" ]; then
-    if ! python3 - "$BACKUP_DIR" "$out" <<'PY'
-import json, sys
+    if ! python3 - "$BACKUP_DIR" "$out" "$INCLUDES_FILE" <<'PY'
+import fnmatch, json, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 report = Path(sys.argv[2])
+includes_file = Path(sys.argv[3])
+include_patterns = []
+if includes_file.exists():
+    include_patterns = [line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
+def matches(pattern, relpath):
+    pat = pattern.strip().lstrip('/')
+    if not pat:
+        return False
+    if pat.endswith('/'):
+        base = pat.rstrip('/')
+        return relpath == base or relpath.startswith(base + '/')
+    return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
+def included(relpath):
+    return any(matches(p, relpath) for p in include_patterns)
 allowed_prefixes = ('.cache/', '.local/share/tirith/')
 allowed_exact = {'state.db', 'state.db-wal', 'state.db-shm'}
 unresolved = []
@@ -507,7 +645,7 @@ for line in report.read_text(errors='ignore').splitlines():
         rel = str(Path(path).resolve().relative_to(root))
     except Exception:
         rel = path
-    if rel in allowed_exact or rel.startswith(allowed_prefixes):
+    if included(rel) or rel in allowed_exact or rel.startswith(allowed_prefixes):
         continue
     unresolved.append(rel)
 if unresolved:
@@ -601,6 +739,7 @@ main() {
   handle_args "$@"
   [ -d "$BACKUP_DIR/.git" ] || fail "backup repo not initialized: run $SCRIPT_DIR/initialize.sh"
   ensure_excludes_file
+  ensure_includes_file
   mirror_source
   sanitation_pass
   run_gitleaks_clean

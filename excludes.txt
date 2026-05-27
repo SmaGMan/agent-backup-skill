@@ -10,16 +10,7 @@ git/
 */.agent-state-backup.conf
 */bin/gitleaks
 */bin/trufflehog
-bin/tirith
-tmp/install_github_fine_grained_token.sh
-.cache/uv/archive-v0/UlGteYt5PRitK5QcRVC8H/telegram/_passport/credentials.py
 .cache/uv/archive-v0/NF1mYZnFR7wyJLNgFzMmB/tornado/test/test.key
-tmp/gh-install/share/man/man1/gh-secret-list.1
-tmp/gh-install/share/man/man1/gh-secret-set.1
-tmp/gh-install/share/man/man1/gh-secret-delete.1
-tmp/gh-install/share/man/man1/gh-auth-token.1
-tmp/gh-install/share/man/man1/gh-secret.1
-skills/devops/secure-state-backups/references/hermes-token-push-and-allowed-state-artifacts.md
 .local/state/hermes/gateway-locks/telegram-bot-token-594a2e2dc7143e04.lock
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials-api.rkyv
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials.rkyv

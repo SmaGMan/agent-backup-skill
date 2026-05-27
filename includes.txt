@@ -1,0 +1,13 @@
+# Persistent force-include patterns for agent-state-backup.
+# Values are relative to SOURCE_DIR (/opt/data by default).
+# These paths override excludes and backup-time secret-like file removal.
+# Use only for user-approved false positives; real secrets should remain excluded/redacted.
+bin/tirith
+tmp/install_github_fine_grained_token.sh
+.cache/uv/archive-v0/UlGteYt5PRitK5QcRVC8H/telegram/_passport/credentials.py
+tmp/gh-install/share/man/man1/gh-secret-list.1
+tmp/gh-install/share/man/man1/gh-secret-set.1
+tmp/gh-install/share/man/man1/gh-secret-delete.1
+tmp/gh-install/share/man/man1/gh-auth-token.1
+tmp/gh-install/share/man/man1/gh-secret.1
+skills/devops/secure-state-backups/references/hermes-token-push-and-allowed-state-artifacts.md

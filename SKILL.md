@@ -48,9 +48,10 @@ agent-state-backup/
     └── config.example
 ```
 
-Persistent exclude patterns live in the skill repository, not in the backup repository:
+Persistent include/exclude patterns live in the skill repository, not in the backup repository:
 
 - `excludes.txt` — tracked skill file with user-approved persistent exclude patterns;
+- `includes.txt` — tracked skill file with user-approved force-include patterns for false positives that must stay in the backup even if their names or scanner output look secret-like;
 - `excluded.txt` — generated audit log inside the backup repository with files removed/redacted during backup.
 
 Runtime files ignored by `.gitignore`:
@@ -99,20 +100,29 @@ Runtime files ignored by `.gitignore`:
    - `node_modules/`, matching any `node_modules` directory at any depth
    - `.npm/`, npm cache/logs that can be rebuilt
    - `.npmrc`, npm config that may contain auth tokens for private registries
-3. Removes additional standalone credential files by filename/content heuristics.
-4. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
-5. Runs `gitleaks`, installing it locally if missing.
-6. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
-7. Automatically redacts scanner-detected secrets when safe to do so.
-8. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-9. Writes non-secret audit details to `excluded.txt` in the backup repository. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
-10. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
+3. Force-includes paths from `includes.txt` in the skill directory. These patterns override `excludes.txt`, backup-time credential-like file removal/redaction, and scanner findings for user-approved false positives. Do not add real credentials here.
+4. Removes additional standalone credential files by filename/content heuristics.
+5. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
+6. Runs `gitleaks`, installing it locally if missing.
+7. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
+8. Automatically redacts scanner-detected secrets when safe to do so, unless the file is force-included.
+9. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
+10. Writes non-secret audit details to `excluded.txt` in the backup repository. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
+11. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
 
 To add something that was mistakenly backed up or should be skipped going forward, run:
 
 ```bash
 ./scripts/backup.sh --add-exclude relative/path/or-pattern
 ```
+
+To force-include a user-approved false positive that would otherwise be excluded or stripped as secret-like, run:
+
+```bash
+./scripts/backup.sh --add-include relative/path/or-pattern
+```
+
+Then remove the path from `excludes.txt` if it was previously excluded. Force-includes are intentionally narrow and should not be used for real live credentials.
 
 Then remove the already-backed-up path from the backup repository in a corrective commit or amend, depending on whether the last backup commit is being fixed.
 
