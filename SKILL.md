@@ -132,11 +132,15 @@ Then remove the already-backed-up path from the backup repository in a correctiv
 
 1. Ensures the skill is available and has local config.
 2. Ensures `/opt/data/git/agent-state-backup` exists and is linked to the configured private repo.
-3. Shows available backup commits.
-4. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
-5. Checks out the selected commit.
-6. Copies files back to `/opt/data` while preserving current secrets in `.env`. Restore does not use today's skill-local `excludes.txt` as a snapshot manifest; older backup commits may contain an obsolete `excludes.txt` file in the backup repository, and restore skips that control file.
-7. Reads `excluded.txt` from the selected backup commit and prints snapshot-specific manual follow-up for files that were removed/redacted during that backup.
+3. Supports safe options: `--dry-run`, `--commit REF`, `--source-dir DIR`, `--backup-dir DIR`, and `--yes`.
+4. Fetches backup refs using the GitHub token from the environment or `SOURCE_DIR/.env` when available; if fetch fails, it warns and uses the local backup repo state.
+5. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
+6. Uses a temporary detached git worktree for the selected commit instead of detaching/modifying the main backup working tree.
+7. Copies files back to `/opt/data` while never deleting files that are absent from the backup snapshot.
+8. Before overwriting live files, saves originals under `SOURCE_DIR/restore-safety-snapshots/<timestamp>/`.
+9. Preserves current secret values when backup files contain `REDACTED_BY_AGENT_STATE_BACKUP` placeholders. `.env` is merged rather than replaced, preserving current secret keys and appending secret keys that are absent from the backup.
+10. Restore does not use today's skill-local `excludes.txt` as a snapshot manifest; older backup commits may contain an obsolete `excludes.txt` file in the backup repository, and restore skips that control file.
+11. Reads `excluded.txt` from the selected backup commit and prints snapshot-specific manual follow-up for files that were removed/redacted during that backup.
 
 ## Cron Report Format and Failure Handling
 
@@ -178,4 +182,5 @@ Important: scanner reports are temporary local files, deleted after use, and sec
 - [ ] `excludes.txt` exists in the skill directory, is tracked with the skill, and does not exclude user-requested state directories such as `sessions/`.
 - [ ] `gitleaks detect --source /opt/data/git/agent-state-backup` returns clean.
 - [ ] First run completed `trufflehog filesystem` successfully.
-- [ ] `scripts/restore.sh` lists commits and preserves existing `.env` secrets during restore.
+- [ ] `scripts/restore.sh --dry-run --commit HEAD` lists a restore summary without modifying files.
+- [ ] `scripts/restore.sh` lists commits, uses a temporary worktree, preserves current `.env` and redacted config secrets, creates an overwrite safety snapshot, and never deletes files absent from the backup.
