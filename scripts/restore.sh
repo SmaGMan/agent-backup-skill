@@ -383,11 +383,11 @@ for item in unresolved_secret_paths[:80]:
 if len(unresolved_secret_paths) > 80:
     print(f'  - ... {len(unresolved_secret_paths)-80} more manual items omitted')
 if other_redacted_paths:
-    print(f'- other redacted placeholders left as-is: {len(other_redacted_paths)}')
+    print(f'- redacted placeholders restored in non-runtime files: {len(other_redacted_paths)}')
     for item in other_redacted_paths[:20]:
-        print(f'  - informational: {item}')
+        print(f'  - non-runtime: {item}')
     if len(other_redacted_paths) > 20:
-        print(f'  - ... {len(other_redacted_paths)-20} more informational items omitted')
+        print(f'  - ... {len(other_redacted_paths)-20} more non-runtime items omitted')
 if unresolved_secret_paths:
     print('Manual steps:')
     print('  - Open each listed file/path in the restored SOURCE_DIR.')
@@ -396,7 +396,7 @@ if unresolved_secret_paths:
 elif other_redacted_paths:
     print('Manual steps:')
     print('  - No runtime secret needs manual action.')
-    print('  - Informational placeholders are from docs/sessions/history; ignore unless you specifically need the original historical text.')
+    print('  - These REDACTED placeholders were restored into docs/sessions/history files and can be ignored unless you specifically need the original historical text.')
 if audit_items:
     print('Backup redaction audit from excluded.txt:')
     for item in audit_items[:50]:

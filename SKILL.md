@@ -142,7 +142,7 @@ Then remove the already-backed-up path from the backup repository in a correctiv
 10. Prints `Secret restore details` with paths only, never values:
     - `restored/preserved secret values` lists each restored path such as `.env :: GITHUB_TOKEN` or `config.yaml :: mcp_servers.trello.env.TRELLO_TOKEN`;
     - `secrets requiring manual action` lists runtime secret/config paths that still need a real value;
-    - `other redacted placeholders left as-is` summarizes docs/sessions/history placeholders that normally need no action.
+    - `redacted placeholders restored in non-runtime files` summarizes docs/sessions/history placeholders that were restored as `REDACTED_BY_AGENT_STATE_BACKUP` and normally need no action.
 11. If manual runtime secrets remain, prints explicit manual steps: open each listed path in `SOURCE_DIR`, re-enter the real value from the provider/password manager, and use the safety snapshot if needed.
 12. Restore does not use today's skill-local `excludes.txt` as a snapshot manifest; older backup commits may contain an obsolete `excludes.txt` file in the backup repository, and restore skips that control file.
 13. Reads `excluded.txt` from the selected backup commit and prints snapshot-specific redaction audit details for files that were removed/redacted during that backup.
