@@ -12,8 +12,10 @@ git/
 */bin/trufflehog
 .cache/uv/archive-v0/NF1mYZnFR7wyJLNgFzMmB/tornado/test/test.key
 .local/state/hermes/gateway-locks/telegram-bot-token-594a2e2dc7143e04.lock
-home/.cache/uv/simple-v21/pypi/alibabacloud-credentials-api.rkyv
-home/.cache/uv/simple-v21/pypi/alibabacloud-credentials.rkyv
 node_modules/
 .npm/
 .npmrc
+state.db
+sessions/20260527_072015_b37d0a.jsonl
+sessions/session_20260527_072015_b37d0a.json
+sessions/session_20260527_123618_ecd997.json
