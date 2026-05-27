@@ -627,8 +627,6 @@ def matches(pattern, relpath):
     return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
 def included(relpath):
     return any(matches(p, relpath) for p in include_patterns)
-allowed_prefixes = ('.cache/', '.local/share/tirith/')
-allowed_exact = {'state.db', 'state.db-wal', 'state.db-shm'}
 unresolved = []
 for line in report.read_text(errors='ignore').splitlines():
     try:
@@ -645,7 +643,7 @@ for line in report.read_text(errors='ignore').splitlines():
         rel = str(Path(path).resolve().relative_to(root))
     except Exception:
         rel = path
-    if included(rel) or rel in allowed_exact or rel.startswith(allowed_prefixes):
+    if included(rel):
         continue
     unresolved.append(rel)
 if unresolved:

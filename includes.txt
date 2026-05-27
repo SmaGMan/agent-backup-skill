@@ -17,3 +17,5 @@ home/.cache/uv/simple-v21/pypi/alibabacloud-credentials-api.rkyv
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials.rkyv
 state.db
 sessions/*
+.cache/
+tirith-threatdb.dat
