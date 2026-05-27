@@ -454,7 +454,7 @@ redact_gitleaks_findings() {
   python3 - "$BACKUP_DIR" "$report" "$INCLUDES_FILE" <<'PY'
 import json, re, sys
 from pathlib import Path
-root = Path(sys.argv[1]); report = Path(sys.argv[2]); includes_file = Path(sys.argv[3])
+root = Path(sys.argv[1]).resolve(); report = Path(sys.argv[2]); includes_file = Path(sys.argv[3])
 include_patterns=[]
 if includes_file.exists():
     include_patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
@@ -469,6 +469,14 @@ def pattern_matches(pattern: str, relpath: str) -> bool:
     return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
 def is_force_included(relpath: str) -> bool:
     return any(pattern_matches(pattern, relpath) for pattern in include_patterns)
+def normalize_finding_file(file: str) -> str:
+    try:
+        path = Path(file)
+        if path.is_absolute():
+            return str(path.resolve().relative_to(root))
+    except Exception:
+        pass
+    return file
 try:
     findings = json.loads(report.read_text() or '[]')
 except Exception as e:
@@ -495,11 +503,12 @@ def finding_location(file, text, finding, secret):
             return f"{file} :: line {line_no}"
     return f"{file} :: unknown parameter"
 for finding in findings:
-    file = finding.get('File') or finding.get('file')
+    raw_file = finding.get('File') or finding.get('file')
     secret = finding.get('Secret') or finding.get('secret')
-    if not file:
+    if not raw_file:
         unresolved.append('unknown-file')
         continue
+    file = normalize_finding_file(raw_file)
     if is_force_included(file):
         continue
     p = (root / file).resolve()
@@ -536,10 +545,11 @@ PY
 }
 gitleaks_unincluded_count() {
   local report="$1"
-  python3 - "$report" "$INCLUDES_FILE" <<'PY'
+  local root="$2"
+  python3 - "$report" "$INCLUDES_FILE" "$root" <<'PY'
 import fnmatch, json, sys
 from pathlib import Path
-report = Path(sys.argv[1]); includes_file = Path(sys.argv[2])
+report = Path(sys.argv[1]); includes_file = Path(sys.argv[2]); root = Path(sys.argv[3]).resolve()
 patterns=[]
 if includes_file.exists():
     patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
@@ -553,13 +563,21 @@ def matches(pattern, relpath):
     return relpath == pat or relpath.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(relpath, pat)
 def included(relpath):
     return any(matches(p, relpath) for p in patterns)
+def normalize_file(file):
+    try:
+        path = Path(file)
+        if path.is_absolute():
+            return str(path.resolve().relative_to(root))
+    except Exception:
+        pass
+    return file
 try:
     findings = json.loads(report.read_text() or '[]')
 except Exception:
     print(1); raise SystemExit
 count = 0
 for finding in findings:
-    file = finding.get('File') or finding.get('file') or ''
+    file = normalize_file(finding.get('File') or finding.get('file') or '')
     if not file or not included(file):
         count += 1
 print(count)
@@ -579,7 +597,7 @@ run_gitleaks_clean() {
     trap - RETURN
     return 0
   fi
-  findings_count="$(gitleaks_unincluded_count "$report")"
+  findings_count="$(gitleaks_unincluded_count "$report" "$BACKUP_DIR")"
   if [ "$findings_count" -eq 0 ]; then
     rm -f /tmp/agent_state_backup_gitleaks.out "$report"
     trap - RETURN
@@ -592,7 +610,7 @@ run_gitleaks_clean() {
   local final_report final_count
   final_report="$(mktemp)"
   "$gitleaks" detect --source "$BACKUP_DIR" --no-git --report-format json --report-path "$final_report" >/tmp/agent_state_backup_gitleaks_final.out 2>&1 || true
-  final_count="$(gitleaks_unincluded_count "$final_report")"
+  final_count="$(gitleaks_unincluded_count "$final_report" "$BACKUP_DIR")"
   rm -f "$final_report" /tmp/agent_state_backup_gitleaks_final.out
   [ "$final_count" -eq 0 ] || fail "gitleaks still reports non-included secrets after redaction"
 }
