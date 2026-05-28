@@ -107,7 +107,7 @@ Runtime files ignored by `.gitignore`:
 7. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
 8. Automatically redacts scanner-detected secrets when safe to do so, unless the file is force-included.
 9. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-10. Writes non-secret audit details to `excluded.txt` in the backup repository. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
+10. Writes non-secret audit details to `excluded.txt` in the backup repository. Explicit `excludes.txt` matches are logged as per-pattern summaries with counts and a few sample paths, not exhaustive file lists, to avoid huge logs for patterns like `git/` or `node_modules/`. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
 11. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
 
 To add something that was mistakenly backed up or should be skipped going forward, run:

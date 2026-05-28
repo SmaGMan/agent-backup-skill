@@ -211,6 +211,8 @@ mirror_source() {
   ensure_includes_file
   python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$EXCLUDES_FILE" "$INCLUDES_FILE" <<'PY'
 import fnmatch, os, shutil, sys, stat
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 src = Path(sys.argv[1]).resolve()
 dst = Path(sys.argv[2]).resolve()
@@ -231,6 +233,8 @@ skip_parts = {'.git', '__pycache__'}
 skip_suffixes = {'.pyc', '.pyo'}
 patterns = []
 include_patterns = []
+excluded_counts = defaultdict(int)
+excluded_samples = defaultdict(list)
 if excludes_file.exists():
     for line in excludes_file.read_text(errors='ignore').splitlines():
         line = line.strip()
@@ -255,24 +259,39 @@ def pattern_matches(pattern: str, rel: Path, is_dir: bool) -> bool:
         return name == pat or fnmatch.fnmatch(name, pat)
     return s == pat or s.startswith(pat.rstrip('/') + '/') or fnmatch.fnmatch(s, pat)
 
-def should_skip(p: Path) -> bool:
+def record_excluded(pattern: str, rel: Path) -> None:
+    excluded_counts[pattern] += 1
+    samples = excluded_samples[pattern]
+    if len(samples) < 3:
+        samples.append(rel.as_posix())
+
+def skip_reason(p: Path):
     rel = p.relative_to(src)
     parts = rel.parts
     if not parts:
-        return False
+        return None
     # .git internals and bytecode are always skipped; includes are for backup false positives, not VCS/cache internals.
     if any(part in skip_parts for part in parts) or p.suffix in skip_suffixes:
-        return True
+        return ('hard', None)
     if any(pattern_matches(pattern, rel, p.is_dir()) for pattern in include_patterns):
-        return False
+        return None
     if p.is_dir():
         s = rel.as_posix().rstrip('/')
         # Keep walking directories that contain a force-included descendant even if the directory itself matches an exclude.
         for pattern in include_patterns:
             pat = pattern.strip().lstrip('/').rstrip('/')
             if pat and (pat == s or pat.startswith(s + '/')):
-                return False
-    return any(pattern_matches(pattern, rel, p.is_dir()) for pattern in patterns)
+                return None
+    for pattern in patterns:
+        if pattern_matches(pattern, rel, p.is_dir()):
+            return ('exclude', pattern)
+    return None
+
+def should_skip(p: Path) -> bool:
+    reason = skip_reason(p)
+    if reason and reason[0] == 'exclude':
+        record_excluded(reason[1], p.relative_to(src))
+    return bool(reason)
 
 for root, dirs, files in os.walk(src):
     rootp = Path(root)
@@ -294,6 +313,13 @@ for root, dirs, files in os.walk(src):
                 shutil.copy2(sp, dp)
         except FileNotFoundError:
             continue
+if excluded_counts:
+    with (dst/'excluded.txt').open('a', encoding='utf-8') as f:
+        ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        f.write(f"\n## {ts} explicit excludes from excludes.txt\n")
+        for pattern in sorted(excluded_counts):
+            samples = ', '.join(excluded_samples[pattern])
+            f.write(f"- excluded by excludes.txt: {pattern} (matched entries: {excluded_counts[pattern]}; samples: {samples})\n")
 PY
 }
 sanitation_pass() {
