@@ -11,6 +11,7 @@ tmp/gh-install/share/man/man1/gh-secret-delete.1
 tmp/gh-install/share/man/man1/gh-auth-token.1
 tmp/gh-install/share/man/man1/gh-secret.1
 skills/devops/secure-state-backups/references/hermes-token-push-and-allowed-state-artifacts.md
+skills/devops/secure-state-backups/references/hermes-backup-cron-and-token-auth.md
 .cache/uv/archive-v0/YMAXUCmHtInUqUL0Ll30r/edge_tts/constants.py
 skills/.bundled_manifest
 home/.cache/uv/simple-v21/pypi/alibabacloud-credentials-api.rkyv
