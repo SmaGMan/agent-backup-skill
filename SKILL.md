@@ -100,6 +100,9 @@ Runtime files ignored by `.gitignore`:
    - `node_modules/`, matching any `node_modules` directory at any depth
    - `.npm/`, npm cache/logs that can be rebuilt
    - `.npmrc`, npm config that may contain auth tokens for private registries
+   - `.cache/` and `home/.cache/`, rebuildable local caches that can contain third-party test fixtures that look like secrets
+
+Cache paths must not be force-included; if a scanner reports findings under cache directories, keep them excluded rather than adding them to `includes.txt`.
 3. Force-includes paths from `includes.txt` in the skill directory. These patterns override `excludes.txt`, backup-time credential-like file removal/redaction, and scanner findings for user-approved false positives. Do not add real credentials here.
 4. Removes additional standalone credential files by filename/content heuristics.
 5. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.

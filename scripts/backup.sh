@@ -310,9 +310,31 @@ for root, dirs, files in os.walk(src):
                     dp.unlink()
                 os.symlink(target, dp)
             else:
+                mode = sp.stat(follow_symlinks=False).st_mode
+                if not stat.S_ISREG(mode):
+                    # Runtime sockets/FIFOs/devices (for example Telegram bridge
+                    # daemon.sock files) cannot be copied as regular files and
+                    # should not be restored from a Git backup.
+                    record_excluded('non-regular runtime file', rel)
+                    continue
                 shutil.copy2(sp, dp)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
+            # Live state can change while cron is copying (rotated logs,
+            # transient sockets, SQLite sidecars, etc.). Treat vanished or
+            # uncopiable runtime files as skipped instead of failing the backup.
+            record_excluded('transient/uncopiable runtime file', rel)
             continue
+# Defense-in-depth: cache directories are rebuildable and often contain
+# third-party test fixtures that look like real secrets. Remove them even if
+# future pattern changes accidentally let them through during the copy walk.
+for cache_rel in (Path('.cache'), Path('home/.cache')):
+    cache_path = dst / cache_rel
+    if cache_path.exists():
+        if cache_path.is_dir() and not cache_path.is_symlink():
+            shutil.rmtree(cache_path)
+        else:
+            cache_path.unlink(missing_ok=True)
+        record_excluded('rebuildable cache directory', cache_rel)
 if excluded_counts:
     with (dst/'excluded.txt').open('a', encoding='utf-8') as f:
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -462,7 +484,7 @@ for p in list(root.rglob('*')):
 with (root/'excluded.txt').open('a', encoding='utf-8') as f:
     if log:
         import datetime
-        f.write(f"\n## {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n")
+        f.write(f"\n## {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}\n")
         for item in log:
             f.write(f"- {item}\n")
 if exclude_patterns:
@@ -548,7 +570,19 @@ for finding in findings:
     original = text
     if secret and secret in text:
         text = text.replace(secret, 'REDACTED_BY_AGENT_STATE_BACKUP')
-    else:
+    elif secret:
+        # Session JSON/log files often contain tool output with newlines and
+        # quotes escaped, so gitleaks' raw Secret string may not appear
+        # literally. Redact common serialized forms too.
+        import json as _json
+        escaped_forms = {
+            _json.dumps(secret)[1:-1],
+            secret.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t'),
+        }
+        for escaped in escaped_forms:
+            if escaped and escaped in text:
+                text = text.replace(escaped, 'REDACTED_BY_AGENT_STATE_BACKUP')
+    if text == original:
         lines = text.splitlines(True)
         start = int(finding.get('StartLine') or finding.get('startLine') or 0)
         if start and 1 <= start <= len(lines) and assign_re.search(lines[start-1]):

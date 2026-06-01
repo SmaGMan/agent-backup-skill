@@ -15,3 +15,5 @@ git/
 node_modules/
 .npm/
 .npmrc
+.cache/
+home/.cache/
