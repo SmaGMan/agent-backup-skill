@@ -210,7 +210,7 @@ mirror_source() {
   ensure_excludes_file
   ensure_includes_file
   python3 - "$SOURCE_DIR" "$BACKUP_DIR" "$EXCLUDES_FILE" "$INCLUDES_FILE" <<'PY'
-import fnmatch, os, shutil, sys, stat
+import fnmatch, hashlib, json, os, shutil, sys, stat
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -335,6 +335,57 @@ for cache_rel in (Path('.cache'), Path('home/.cache')):
         else:
             cache_path.unlink(missing_ok=True)
         record_excluded('rebuildable cache directory', cache_rel)
+
+# GitHub rejects individual blobs over 100 MiB. Preserve large state files by
+# replacing each large regular file with deterministic chunks plus a manifest;
+# restore.sh reassembles these chunks back to the original relative path.
+large_root = dst / '.agent-state-backup-large-files'
+large_manifest = large_root / 'manifest.json'
+large_threshold = int(os.environ.get('AGENT_STATE_BACKUP_LARGE_THRESHOLD', str(95 * 1024 * 1024)))
+chunk_size = int(os.environ.get('AGENT_STATE_BACKUP_CHUNK_SIZE', str(50 * 1024 * 1024)))
+manifest = {'version': 1, 'chunk_size': chunk_size, 'files': []}
+if large_root.exists():
+    shutil.rmtree(large_root)
+for p in sorted(dst.rglob('*')):
+    if not p.is_file() or p.is_symlink() or '.git' in p.parts or large_root.name in p.parts:
+        continue
+    try:
+        st = p.stat()
+    except OSError:
+        continue
+    if st.st_size <= large_threshold:
+        continue
+    rel = p.relative_to(dst)
+    part_dir = large_root / rel.parent / f'{rel.name}.parts'
+    part_dir.mkdir(parents=True, exist_ok=True)
+    parts = []
+    digest = hashlib.sha256()
+    with p.open('rb') as src_f:
+        index = 0
+        while True:
+            chunk = src_f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+            part_name = f'part-{index:05d}'
+            (part_dir / part_name).write_bytes(chunk)
+            parts.append((part_dir / part_name).relative_to(dst).as_posix())
+            index += 1
+    p.unlink()
+    manifest['files'].append({
+        'path': rel.as_posix(),
+        'size': st.st_size,
+        'mode': stat.S_IMODE(st.st_mode),
+        'mtime_ns': st.st_mtime_ns,
+        'sha256': digest.hexdigest(),
+        'parts': parts,
+    })
+    record_excluded('large file stored as chunks', rel)
+if manifest['files']:
+    large_root.mkdir(parents=True, exist_ok=True)
+    large_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+elif large_root.exists():
+    shutil.rmtree(large_root)
 if excluded_counts:
     with (dst/'excluded.txt').open('a', encoding='utf-8') as f:
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')

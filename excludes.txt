@@ -17,3 +17,5 @@ node_modules/
 .npmrc
 .cache/
 home/.cache/
+profiles/budget/bin/tirith
+skills/autonomous-ai-agents/hermes-agent/references/cron-fallback-credential-pool-recovery.md

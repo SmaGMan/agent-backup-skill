@@ -140,7 +140,7 @@ restore_files() {
   git -C "$BACKUP_DIR" worktree add --detach --quiet "$worktree" "$commit"
   set +e
   python3 - "$SOURCE_DIR" "$worktree" "$commit" "$DRY_RUN" <<'PY'
-import os, shutil, sys, time, re
+import os, shutil, sys, time, re, json, hashlib, tempfile, atexit
 from pathlib import Path
 source = Path(sys.argv[1]).resolve()
 snapshot = Path(sys.argv[2]).resolve()
@@ -203,7 +203,7 @@ if audit.exists():
 
 def should_skip(rel: Path):
     s = rel.as_posix()
-    return s in {'.git','excludes.txt','excluded.txt'} or s.startswith('.git/')
+    return s in {'.git','excludes.txt','excluded.txt'} or s.startswith(('.git/', '.agent-state-backup-large-files/')) or s == '.agent-state-backup-large-files'
 
 def parse_env_lines(lines):
     result = {}
@@ -295,6 +295,42 @@ for root, dirs, names in os.walk(snapshot):
         rel = sp.relative_to(snapshot)
         if not should_skip(rel):
             files.append((sp, rel, source / rel))
+
+large_manifest = snapshot / '.agent-state-backup-large-files' / 'manifest.json'
+large_temp = Path(tempfile.mkdtemp(prefix='agent-state-restore-large-'))
+atexit.register(lambda: shutil.rmtree(large_temp, ignore_errors=True))
+if large_manifest.exists():
+    manifest = json.loads(large_manifest.read_text(errors='ignore') or '{}')
+    for entry in manifest.get('files', []):
+        rel = Path(entry['path'])
+        if rel.is_absolute() or '..' in rel.parts:
+            raise RuntimeError(f'invalid large-file manifest path: {entry.get("path")}')
+        assembled = large_temp / rel
+        assembled.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        total = 0
+        with assembled.open('wb') as out:
+            for part in entry.get('parts', []):
+                part_rel = Path(part)
+                if part_rel.is_absolute() or '..' in part_rel.parts:
+                    raise RuntimeError(f'invalid large-file part path: {part}')
+                part_path = snapshot / part_rel
+                data = part_path.read_bytes()
+                digest.update(data)
+                total += len(data)
+                out.write(data)
+        expected_size = int(entry.get('size', -1))
+        if expected_size >= 0 and total != expected_size:
+            raise RuntimeError(f'large-file size mismatch for {rel}: {total} != {expected_size}')
+        expected_sha = entry.get('sha256')
+        if expected_sha and digest.hexdigest() != expected_sha:
+            raise RuntimeError(f'large-file checksum mismatch for {rel}')
+        if 'mode' in entry:
+            os.chmod(assembled, int(entry['mode']))
+        if 'mtime_ns' in entry:
+            ns = int(entry['mtime_ns'])
+            os.utime(assembled, ns=(ns, ns))
+        files.append((assembled, rel, source / rel))
 
 added=sum(1 for _,_,dp in files if not dp.exists() and not dp.is_symlink())
 overwritten=len(files)-added

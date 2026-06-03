@@ -110,8 +110,9 @@ Cache paths must not be force-included; if a scanner reports findings under cach
 7. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
 8. Automatically redacts scanner-detected secrets when safe to do so, unless the file is force-included.
 9. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-10. Writes non-secret audit details to `excluded.txt` in the backup repository. Explicit `excludes.txt` matches are logged as per-pattern summaries with counts and a few sample paths, not exhaustive file lists, to avoid huge logs for patterns like `git/` or `node_modules/`. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
-11. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
+10. Large regular files above GitHub's single-blob limit safety threshold (default 95 MiB), including `state.db` when it grows too large, are stored as deterministic chunks under `.agent-state-backup-large-files/` with a manifest. Restore reassembles these chunks back to their original paths, so the state is still backed up without Git LFS.
+11. Writes non-secret audit details to `excluded.txt` in the backup repository. Explicit `excludes.txt` matches are logged as per-pattern summaries with counts and a few sample paths, not exhaustive file lists, to avoid huge logs for patterns like `git/` or `node_modules/`. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
+12. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
 
 To add something that was mistakenly backed up or should be skipped going forward, run:
 
@@ -139,7 +140,7 @@ Then remove the already-backed-up path from the backup repository in a correctiv
 4. Fetches backup refs using the GitHub token from the environment or `SOURCE_DIR/.env` when available; if fetch fails, it warns and uses the local backup repo state.
 5. If the backup working tree has local changes, prompts to create a new snapshot or discard changes.
 6. Uses a temporary detached git worktree for the selected commit instead of detaching/modifying the main backup working tree.
-7. Copies files back to `/opt/data` while never deleting files that are absent from the backup snapshot.
+7. Copies files back to `/opt/data` while never deleting files that are absent from the backup snapshot. Large-file chunk manifests under `.agent-state-backup-large-files/` are reassembled back to their original paths before copying, so chunked `state.db` restores as `state.db`.
 8. Before overwriting live files, saves originals under `SOURCE_DIR/restore-safety-snapshots/<timestamp>/`.
 9. Preserves current secret values when backup files contain `REDACTED_BY_AGENT_STATE_BACKUP` placeholders. `.env` is merged rather than replaced, preserving current secret keys and appending secret keys that are absent from the backup.
 10. Prints `Secret restore details` with paths only, never values:
