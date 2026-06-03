@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Generate a patch for local /opt/hermes customizations.
+
+The baseline is the Git revision baked into the Hermes Docker image.  The
+script is intentionally deterministic and LLM-free so backup.sh can run it
+before mirroring /opt/data into the backup repository.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+DEFAULT_SOURCE_DIR = Path(os.environ.get("HERMES_INSTALL_DIR", "/opt/hermes"))
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("HERMES_PATCH_OUTPUT_DIR", "/opt/data/hermes-patches"))
+DEFAULT_REPO_DIR = Path(os.environ.get("HERMES_UPSTREAM_REPO_DIR", "/opt/data/git/hermes-agent"))
+DEFAULT_REPO_URL = os.environ.get("HERMES_UPSTREAM_REPO_URL", "https://github.com/NousResearch/hermes-agent.git")
+DOCKER_REPO = os.environ.get("HERMES_DOCKER_REPO", "nousresearch/hermes-agent")
+
+# These mirror the Docker build/runtime noise we do not want in a customization
+# patch.  They deliberately cover dependency/cache/build outputs, not source.
+EXCLUDED_DIR_NAMES = {
+    ".git",
+    ".github",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".playwright",
+}
+EXCLUDED_PREFIXES = (
+    "hermes_cli/web_dist/",
+    "web/build/",
+    "web/dist/",
+    "ui-tui/dist/",
+    "ui-tui/packages/hermes-ink/dist/",
+)
+EXCLUDED_FILE_NAMES = {".gitignore", ".gitmodules", ".env"}
+EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".orig"}
+EXCLUDED_EXTENSIONS = {".md", ".jpg", ".jpeg", ".png", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".otf"}
+
+
+def run(cmd: List[str], *, cwd: Path | None = None, check: bool = True, text: bool = True, input_data=None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        input=input_data,
+        text=text,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=check,
+    )
+
+
+def is_excluded(rel: str, *, is_dir: bool = False) -> bool:
+    rel = rel.strip("/")
+    if not rel:
+        return False
+    parts = rel.split("/")
+    name = parts[-1]
+    if any(part in EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts):
+        return True
+    if is_dir and name in EXCLUDED_DIR_NAMES:
+        return True
+    if any((rel + ("/" if is_dir and not rel.endswith("/") else "")).startswith(prefix) or rel.startswith(prefix) for prefix in EXCLUDED_PREFIXES):
+        return True
+    if name in EXCLUDED_FILE_NAMES:
+        return True
+    if any(name.endswith(suffix) for suffix in EXCLUDED_SUFFIXES):
+        return True
+    if Path(name).suffix in EXCLUDED_EXTENSIONS:
+        return True
+    return False
+
+
+def parse_local_version(source_dir: Path) -> Tuple[str | None, str | None]:
+    init_path = source_dir / "hermes_cli" / "__init__.py"
+    if not init_path.exists():
+        return None, None
+    text = init_path.read_text(encoding="utf-8", errors="ignore")
+    version_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+    date_match = re.search(r'__release_date__\s*=\s*["\']([^"\']+)["\']', text)
+    version = version_match.group(1) if version_match else None
+    release_date = date_match.group(1) if date_match else None
+    return version, release_date
+
+
+def docker_auth_token(repo: str) -> str:
+    params = urllib.parse.urlencode({"service": "registry.docker.io", "scope": f"repository:{repo}:pull"})
+    with urllib.request.urlopen(f"https://auth.docker.io/token?{params}", timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))["token"]
+
+
+def registry_json(repo: str, ref: str, token: str, accept: str) -> Tuple[dict, str | None]:
+    req = urllib.request.Request(
+        f"https://registry-1.docker.io/v2/{repo}/manifests/{ref}",
+        headers={"Authorization": f"Bearer {token}", "Accept": accept},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        digest = resp.headers.get("Docker-Content-Digest")
+        return json.loads(resp.read().decode("utf-8")), digest
+
+
+def registry_blob(repo: str, digest: str, token: str) -> dict:
+    req = urllib.request.Request(
+        f"https://registry-1.docker.io/v2/{repo}/blobs/{digest}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def revision_from_docker_tag(tag: str, arch: str) -> dict:
+    token = docker_auth_token(DOCKER_REPO)
+    accept_index = ", ".join([
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    ])
+    data, index_digest = registry_json(DOCKER_REPO, tag, token, accept_index)
+    manifest = data
+    manifest_digest = index_digest
+    if "manifests" in data:
+        selected = None
+        for item in data.get("manifests", []):
+            platform = item.get("platform") or {}
+            if platform.get("os") == "linux" and platform.get("architecture") in {arch, "arm64" if arch == "aarch64" else arch}:
+                selected = item
+                break
+        if selected is None:
+            raise RuntimeError(f"Docker tag {tag!r} has no linux/{arch} manifest")
+        manifest_digest = selected.get("digest")
+        manifest, _ = registry_json(
+            DOCKER_REPO,
+            manifest_digest,
+            token,
+            "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+        )
+    config_digest = (manifest.get("config") or {}).get("digest")
+    if not config_digest:
+        raise RuntimeError(f"Docker manifest for {tag!r} has no config digest")
+    config = registry_blob(DOCKER_REPO, config_digest, token)
+    labels = ((config.get("config") or {}).get("Labels") or {})
+    revision = labels.get("org.opencontainers.image.revision")
+    if not revision:
+        raise RuntimeError(f"Docker tag {tag!r} has no org.opencontainers.image.revision label")
+    return {
+        "revision": revision,
+        "method": "docker_registry_tag_label",
+        "docker_repo": DOCKER_REPO,
+        "docker_tag": tag,
+        "index_digest": index_digest,
+        "manifest_digest": manifest_digest,
+        "config_digest": config_digest,
+        "image_created": config.get("created"),
+    }
+
+
+def resolve_baseline_revision(source_dir: Path) -> dict:
+    for env_name in ("HERMES_IMAGE_REVISION", "HERMES_DOCKER_IMAGE_REVISION", "OCI_IMAGE_REVISION", "HERMES_BASE_REVISION"):
+        value = os.environ.get(env_name, "").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}", value):
+            return {"revision": value.lower(), "method": f"env:{env_name}"}
+
+    version, release_date = parse_local_version(source_dir)
+    if release_date:
+        tag = "v" + release_date.strip().lstrip("v")
+        info = revision_from_docker_tag(tag, arch=os.uname().machine)
+        info["local_version"] = version
+        info["local_release_date"] = release_date
+        return info
+
+    git_dir = source_dir / ".git"
+    if git_dir.exists():
+        revision = run(["git", "rev-parse", "HEAD"], cwd=source_dir).stdout.strip()
+        return {"revision": revision, "method": "local_git_head"}
+
+    raise RuntimeError("could not determine Docker image baseline revision; set HERMES_IMAGE_REVISION")
+
+
+def ensure_repo(repo_dir: Path, repo_url: str, revision: str) -> None:
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    if (repo_dir / ".git").exists():
+        run(["git", "remote", "set-url", "origin", repo_url], cwd=repo_dir)
+        run(["git", "fetch", "--tags", "origin"], cwd=repo_dir)
+    else:
+        run(["git", "clone", repo_url, str(repo_dir)])
+        run(["git", "fetch", "--tags", "origin"], cwd=repo_dir)
+    exists = run(["git", "cat-file", "-e", f"{revision}^{{commit}}"], cwd=repo_dir, check=False)
+    if exists.returncode != 0:
+        # Some servers allow direct SHA fetch only when reachable; try it before failing.
+        run(["git", "fetch", "origin", revision], cwd=repo_dir)
+        run(["git", "cat-file", "-e", f"{revision}^{{commit}}"], cwd=repo_dir)
+
+
+def ensure_worktree(repo_dir: Path, revision: str) -> Path:
+    wt = repo_dir.parent / f"hermes-agent-base-{revision[:12]}"
+    if (wt / ".git").exists():
+        run(["git", "checkout", "--detach", revision], cwd=wt)
+        run(["git", "reset", "--hard", revision], cwd=wt)
+    else:
+        run(["git", "worktree", "add", "--detach", str(wt), revision], cwd=repo_dir)
+    return wt
+
+
+def git_ls_tree(repo_dir: Path, revision: str) -> Dict[str, Tuple[str, str]]:
+    out = run(["git", "ls-tree", "-r", revision], cwd=repo_dir).stdout
+    items: Dict[str, Tuple[str, str]] = {}
+    for line in out.splitlines():
+        if "\t" not in line:
+            continue
+        meta, path = line.split("\t", 1)
+        parts = meta.split()
+        if len(parts) < 3 or parts[1] != "blob":
+            continue
+        if is_excluded(path):
+            continue
+        items[path] = (parts[0], parts[2])
+    return items
+
+
+def blob_hash_for_bytes(repo_dir: Path, data: bytes) -> str:
+    proc = subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        cwd=str(repo_dir),
+        input=data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return proc.stdout.decode("ascii").strip()
+
+
+def current_blob_hash(repo_dir: Path, path: Path) -> str:
+    if path.is_symlink():
+        return blob_hash_for_bytes(repo_dir, os.readlink(path).encode("utf-8"))
+    return run(["git", "hash-object", str(path)], cwd=repo_dir).stdout.strip()
+
+
+def iter_current_files(source_dir: Path) -> Iterable[str]:
+    for root, dirs, files in os.walk(source_dir):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(source_dir).as_posix() if root_path != source_dir else ""
+        kept_dirs = []
+        for d in dirs:
+            rel = f"{rel_root}/{d}" if rel_root else d
+            if not is_excluded(rel, is_dir=True):
+                kept_dirs.append(d)
+        dirs[:] = kept_dirs
+        for name in files:
+            rel = f"{rel_root}/{name}" if rel_root else name
+            if not is_excluded(rel):
+                yield rel
+
+
+def classify_changes(repo_dir: Path, source_dir: Path, revision: str) -> Tuple[List[str], List[str], List[str]]:
+    base = git_ls_tree(repo_dir, revision)
+    added: List[str] = []
+    modified: List[str] = []
+    deleted: List[str] = []
+
+    for rel, (_mode, base_hash) in base.items():
+        current_path = source_dir / rel
+        if not current_path.exists() and not current_path.is_symlink():
+            deleted.append(rel)
+            continue
+        try:
+            cur_hash = current_blob_hash(repo_dir, current_path)
+        except Exception:
+            modified.append(rel)
+            continue
+        if cur_hash != base_hash:
+            modified.append(rel)
+
+    base_paths = set(base)
+    for rel in iter_current_files(source_dir):
+        if rel not in base_paths:
+            added.append(rel)
+
+    return sorted(added), sorted(modified), sorted(deleted)
+
+
+def copy_current(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_symlink():
+        os.symlink(os.readlink(src), dst)
+    else:
+        shutil.copy2(src, dst)
+
+
+def write_git_blob(repo_dir: Path, revision: str, rel: str, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    data = subprocess.run(
+        ["git", "show", f"{revision}:{rel}"],
+        cwd=str(repo_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    dst.write_bytes(data)
+
+
+def build_patch(repo_dir: Path, source_dir: Path, revision: str, added: List[str], modified: List[str], deleted: List[str]) -> str:
+    with tempfile.TemporaryDirectory(prefix="hermes-local-patch-") as td:
+        tmp = Path(td)
+        base_dir = tmp / "base"
+        cur_dir = tmp / "current"
+        base_dir.mkdir()
+        cur_dir.mkdir()
+        for rel in modified + deleted:
+            write_git_blob(repo_dir, revision, rel, base_dir / rel)
+        for rel in modified + added:
+            copy_current(source_dir / rel, cur_dir / rel)
+        proc = subprocess.run(
+            ["git", "diff", "--no-index", "--binary", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "base", "current"],
+            cwd=str(tmp),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode not in (0, 1):
+            raise RuntimeError(proc.stderr.strip() or "git diff --no-index failed")
+        text = proc.stdout
+        # Normalize temporary directory names out of patch paths.
+        replacements = {
+            "a/base/": "a/",
+            "b/current/": "b/",
+            "--- a/base/": "--- a/",
+            "+++ b/current/": "+++ b/",
+            "diff --git a/base/": "diff --git a/",
+            " b/current/": " b/",
+            "Binary files a/base/": "Binary files a/",
+            " and b/current/": " and b/",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text
+
+
+def choose_output_paths(output_dir: Path, revision: str) -> Tuple[Path, Path, str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prefixes = {revision, revision[:12], revision[:10], revision[:8], revision[:7], revision[:6], revision[:5], revision[:4]}
+    basename = "hermes-local-customizations-vs-"
+    chosen_suffix = None
+    for path in sorted(output_dir.glob(f"{basename}*.patch")):
+        suffix = path.name[len(basename):-len(".patch")]
+        if suffix in prefixes:
+            chosen_suffix = suffix
+            break
+    if chosen_suffix is None:
+        chosen_suffix = revision[:12]
+    patch_path = output_dir / f"{basename}{chosen_suffix}.patch"
+    manifest_path = output_dir / f"{basename}{chosen_suffix}.manifest.txt"
+    return patch_path, manifest_path, chosen_suffix
+
+
+def write_manifest(path: Path, info: dict, patch_path: Path, added: List[str], modified: List[str], deleted: List[str], *, no_changes: bool) -> None:
+    now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "Hermes local customizations manifest",
+        f"generated_at_utc: {now}",
+        f"baseline_revision: {info['revision']}",
+        f"baseline_method: {info.get('method', 'unknown')}",
+    ]
+    for key in ("docker_repo", "docker_tag", "index_digest", "manifest_digest", "config_digest", "image_created", "local_version", "local_release_date"):
+        if info.get(key):
+            lines.append(f"{key}: {info[key]}")
+    lines.extend([
+        f"patch_file: {patch_path.name}",
+        f"status: {'no local customizations' if no_changes else 'local customizations present'}",
+        f"added_files: {len(added)}",
+        f"modified_files: {len(modified)}",
+        f"deleted_files: {len(deleted)}",
+        "",
+        "Excluded from comparison: .git/.github, virtualenvs, node_modules, egg-info, caches, generated UI/web assets, __pycache__, *.pyc/*.pyo/*.orig, *.md, common binary media/font assets, .env.",
+    ])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(description="Generate /opt/hermes customization patch against Docker image baseline")
+    parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--repo-dir", type=Path, default=DEFAULT_REPO_DIR)
+    parser.add_argument("--repo-url", default=DEFAULT_REPO_URL)
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args(argv)
+
+    source_dir = args.source_dir.resolve()
+    if not source_dir.exists():
+        raise RuntimeError(f"Hermes install dir missing: {source_dir}")
+
+    info = resolve_baseline_revision(source_dir)
+    revision = info["revision"].lower()
+    ensure_repo(args.repo_dir.resolve(), args.repo_url, revision)
+    ensure_worktree(args.repo_dir.resolve(), revision)
+
+    added, modified, deleted = classify_changes(args.repo_dir.resolve(), source_dir, revision)
+    patch_path, manifest_path, suffix = choose_output_paths(args.output_dir.resolve(), revision)
+    no_changes = not (added or modified or deleted)
+
+    if no_changes:
+        patch_path.write_text(
+            "Hermes local customizations manifest\n"
+            "status: no local customizations\n"
+            f"baseline_revision: {revision}\n"
+            f"manifest_file: {manifest_path.name}\n",
+            encoding="utf-8",
+        )
+    else:
+        patch_path.write_text(build_patch(args.repo_dir.resolve(), source_dir, revision, added, modified, deleted), encoding="utf-8")
+    write_manifest(manifest_path, info, patch_path, added, modified, deleted, no_changes=no_changes)
+
+    if not args.quiet:
+        print(f"Status: {'no changes' if no_changes else 'patch generated'}")
+        print(f"Baseline: {revision}")
+        print(f"Patch: {patch_path}")
+        print(f"Manifest: {manifest_path}")
+        print(f"Added: {len(added)}")
+        print(f"Modified: {len(modified)}")
+        print(f"Deleted: {len(deleted)}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)

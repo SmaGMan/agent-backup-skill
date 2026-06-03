@@ -43,6 +43,7 @@ agent-state-backup/
 ├── scripts/
 │   ├── initialize.sh
 │   ├── backup.sh
+│   ├── generate-hermes-patch.py
 │   └── restore.sh
 └── templates/
     └── config.example
@@ -90,8 +91,9 @@ Runtime files ignored by `.gitignore`:
 
 `backup.sh`:
 
-1. Copies `/opt/data` to `/opt/data/git/agent-state-backup`.
-2. Excludes paths from `excludes.txt` in the skill directory. This file is the persistent source of truth for backup exclusions and currently excludes known credential-only files/directories, local git repositories, and rebuildable dependency/cache directories:
+1. Runs `scripts/generate-hermes-patch.py` before mirroring state. The generator is script-only (no LLM): it determines the Git revision baked into the current Hermes Docker image, compares `/opt/hermes` against that revision, and writes the current customization patch/manifest under `/opt/data/hermes-patches/` so it is included in the backup. If the current image baseline changes, the generated filename changes with the baseline commit. Existing patches for older baselines are not deleted. If there are no local `/opt/hermes` customizations, the generator writes a manifest instead of a diff.
+2. Copies `/opt/data` to `/opt/data/git/agent-state-backup`.
+3. Excludes paths from `excludes.txt` in the skill directory. This file is the persistent source of truth for backup exclusions and currently excludes known credential-only files/directories, local git repositories, and rebuildable dependency/cache directories:
    - `auth.json`
    - `google_client_secret.json`
    - `google_token.json`
@@ -103,16 +105,16 @@ Runtime files ignored by `.gitignore`:
    - `.cache/` and `home/.cache/`, rebuildable local caches that can contain third-party test fixtures that look like secrets
 
 Cache paths must not be force-included; if a scanner reports findings under cache directories, keep them excluded rather than adding them to `includes.txt`.
-3. Force-includes paths from `includes.txt` in the skill directory. These patterns override `excludes.txt`, backup-time credential-like file removal/redaction, and scanner findings for user-approved false positives. Do not add real credentials here.
-4. Removes additional standalone credential files by filename/content heuristics.
-5. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
-6. Runs `gitleaks`, installing it locally if missing.
-7. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
-8. Automatically redacts scanner-detected secrets when safe to do so, unless the file is force-included.
-9. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
-10. Large regular files above GitHub's single-blob limit safety threshold (default 95 MiB), including `state.db` when it grows too large, are stored as deterministic chunks under `.agent-state-backup-large-files/` with a manifest. Restore reassembles these chunks back to their original paths, so the state is still backed up without Git LFS.
-11. Writes non-secret audit details to `excluded.txt` in the backup repository. Explicit `excludes.txt` matches are logged as per-pattern summaries with counts and a few sample paths, not exhaustive file lists, to avoid huge logs for patterns like `git/` or `node_modules/`. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
-12. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
+4. Force-includes paths from `includes.txt` in the skill directory. These patterns override `excludes.txt`, backup-time credential-like file removal/redaction, and scanner findings for user-approved false positives. Do not add real credentials here.
+5. Removes additional standalone credential files by filename/content heuristics.
+6. Redacts `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from `.env`, and also redacts common token/key/secret/password environment variables.
+7. Runs `gitleaks`, installing it locally if missing.
+8. On first push from this skill checkout, runs `trufflehog`, installing it locally if missing.
+9. Automatically redacts scanner-detected secrets when safe to do so, unless the file is force-included.
+10. Stops and reports an error if a scanner finding cannot be safely redacted without likely corrupting data.
+11. Large regular files above GitHub's single-blob limit safety threshold (default 95 MiB), including `state.db` when it grows too large, are stored as deterministic chunks under `.agent-state-backup-large-files/` with a manifest. Restore reassembles these chunks back to their original paths, so the state is still backed up without Git LFS.
+12. Writes non-secret audit details to `excluded.txt` in the backup repository. Explicit `excludes.txt` matches are logged as per-pattern summaries with counts and a few sample paths, not exhaustive file lists, to avoid huge logs for patterns like `git/` or `node_modules/`. Redacted assignment entries include the file path and parameter path/key, for example `config.yaml :: gateway.telegram.token` or `.env :: TELEGRAM_BOT_TOKEN`, so restore follow-up is actionable without exposing secret values. If backup-time cleanup discovers new credential-like files that should be skipped in future runs, it appends their relative paths to the skill's `excludes.txt`, not to the backup repository.
+13. Commits as `backup YYYY-MM-DD HH:MM UTC` and pushes.
 
 To add something that was mistakenly backed up or should be skipped going forward, run:
 

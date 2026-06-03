@@ -36,6 +36,17 @@ fail() {
   exit 1
 }
 say() { printf '%s\n' "$*"; }
+generate_hermes_patch() {
+  local generator="$SCRIPT_DIR/generate-hermes-patch.py" out err
+  [ -f "$generator" ] || fail "Hermes patch generator missing: $generator"
+  out="$(mktemp)"
+  if ! python3 "$generator" --quiet >"$out" 2>&1; then
+    err="$(tail -n 5 "$out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    rm -f "$out"
+    fail "Hermes patch generation failed: $err"
+  fi
+  rm -f "$out"
+}
 load_config() {
   if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
@@ -907,6 +918,7 @@ main() {
   [ -d "$BACKUP_DIR/.git" ] || fail "backup repo not initialized: run $SCRIPT_DIR/initialize.sh"
   ensure_excludes_file
   ensure_includes_file
+  generate_hermes_patch
   mirror_source
   sanitation_pass
   run_gitleaks_clean
