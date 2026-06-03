@@ -395,6 +395,7 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--repo-dir", type=Path, default=DEFAULT_REPO_DIR)
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL)
+    parser.add_argument("--status-file", type=Path, help="Write a JSON status summary for callers such as backup.sh")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -422,6 +423,21 @@ def main(argv: List[str]) -> int:
     else:
         patch_path.write_text(build_patch(args.repo_dir.resolve(), source_dir, revision, added, modified, deleted), encoding="utf-8")
     write_manifest(manifest_path, info, patch_path, added, modified, deleted, no_changes=no_changes)
+
+    status_summary = {
+        "status": "no changes" if no_changes else "patch generated",
+        "baseline_revision": revision,
+        "patch_path": str(patch_path),
+        "patch_file": patch_path.name,
+        "manifest_path": str(manifest_path),
+        "manifest_file": manifest_path.name,
+        "added": len(added),
+        "modified": len(modified),
+        "deleted": len(deleted),
+    }
+    if args.status_file:
+        args.status_file.parent.mkdir(parents=True, exist_ok=True)
+        args.status_file.write_text(json.dumps(status_summary, sort_keys=True) + "\n", encoding="utf-8")
 
     if not args.quiet:
         print(f"Status: {'no changes' if no_changes else 'patch generated'}")

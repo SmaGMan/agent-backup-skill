@@ -14,6 +14,7 @@ ADDED_COUNT=0
 MODIFIED_COUNT=0
 DELETED_COUNT=0
 NEW_SECRET_FINDINGS=0
+HERMES_PATCH_REPORT="not generated"
 mkdir -p "$BIN_DIR"
 
 print_report() {
@@ -23,6 +24,7 @@ print_report() {
   printf 'Added files: %s\n' "$ADDED_COUNT"
   printf 'Modified files: %s\n' "$MODIFIED_COUNT"
   printf 'Deleted files: %s\n' "$DELETED_COUNT"
+  printf 'Hermes patch: %s\n' "$HERMES_PATCH_REPORT"
   printf 'New secrets: %s\n' "$secrets"
   printf 'Errors: %s\n' "$errors"
 }
@@ -37,15 +39,35 @@ fail() {
 }
 say() { printf '%s\n' "$*"; }
 generate_hermes_patch() {
-  local generator="$SCRIPT_DIR/generate-hermes-patch.py" out err
+  local generator="$SCRIPT_DIR/generate-hermes-patch.py" out err summary
   [ -f "$generator" ] || fail "Hermes patch generator missing: $generator"
   out="$(mktemp)"
-  if ! python3 "$generator" --quiet >"$out" 2>&1; then
+  summary="$(mktemp)"
+  if ! python3 "$generator" --quiet --status-file "$summary" >"$out" 2>&1; then
     err="$(tail -n 5 "$out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
-    rm -f "$out"
+    rm -f "$out" "$summary"
     fail "Hermes patch generation failed: $err"
   fi
-  rm -f "$out"
+  HERMES_PATCH_REPORT="$(python3 - "$summary" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    print('generated (status unavailable)')
+    raise SystemExit
+status = data.get('status') or 'generated'
+patch = data.get('patch_file') or 'unknown patch file'
+added = int(data.get('added') or 0)
+modified = int(data.get('modified') or 0)
+deleted = int(data.get('deleted') or 0)
+if status == 'no changes':
+    print(f'no local customizations; manifest {patch}')
+else:
+    print(f'generated {patch} (+{added}/~{modified}/-{deleted})')
+PY
+)"
+  rm -f "$out" "$summary"
 }
 load_config() {
   if [ -f "$CONFIG_FILE" ]; then
