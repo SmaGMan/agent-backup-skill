@@ -500,7 +500,7 @@ def redaction_paths(name, suffix, text):
         found.extend(json_redaction_paths(text))
     return sorted(set(found))
 for p in list(root.rglob('*')):
-    if not p.is_file() or '.git' in p.parts:
+    if not p.is_file() or '.git' in p.parts or '.agent-state-backup-large-files' in p.parts:
         continue
     r = rel(p)
     name = p.name
@@ -555,6 +555,17 @@ import json, re, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve(); report = Path(sys.argv[2]); includes_file = Path(sys.argv[3])
 include_patterns=[]
+chunk_original = {}
+manifest_path = root / '.agent-state-backup-large-files' / 'manifest.json'
+if manifest_path.exists():
+    try:
+        for entry in json.loads(manifest_path.read_text(errors='ignore') or '{}').get('files', []):
+            original = entry.get('path')
+            for part in entry.get('parts', []):
+                if original and part:
+                    chunk_original[part] = original
+    except Exception:
+        pass
 if includes_file.exists():
     include_patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
 def pattern_matches(pattern: str, relpath: str) -> bool:
@@ -608,7 +619,13 @@ for finding in findings:
         unresolved.append('unknown-file')
         continue
     file = normalize_finding_file(raw_file)
-    if is_force_included(file):
+    effective_file = chunk_original.get(file, file)
+    if file in chunk_original:
+        if is_force_included(effective_file):
+            continue
+        unresolved.append(effective_file)
+        continue
+    if is_force_included(effective_file):
         continue
     p = (root / file).resolve()
     if not str(p).startswith(str(root.resolve())) or not p.exists() or not p.is_file():
@@ -662,6 +679,17 @@ import fnmatch, json, sys
 from pathlib import Path
 report = Path(sys.argv[1]); includes_file = Path(sys.argv[2]); root = Path(sys.argv[3]).resolve()
 patterns=[]
+chunk_original = {}
+manifest_path = root / '.agent-state-backup-large-files' / 'manifest.json'
+if manifest_path.exists():
+    try:
+        for entry in json.loads(manifest_path.read_text(errors='ignore') or '{}').get('files', []):
+            original = entry.get('path')
+            for part in entry.get('parts', []):
+                if original and part:
+                    chunk_original[part] = original
+    except Exception:
+        pass
 if includes_file.exists():
     patterns=[line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
 def matches(pattern, relpath):
@@ -689,7 +717,8 @@ except Exception:
 count = 0
 for finding in findings:
     file = normalize_file(finding.get('File') or finding.get('file') or '')
-    if not file or not included(file):
+    effective_file = chunk_original.get(file, file)
+    if not file or not included(effective_file):
         count += 1
 print(count)
 PY
@@ -744,6 +773,17 @@ root = Path(sys.argv[1]).resolve()
 report = Path(sys.argv[2])
 includes_file = Path(sys.argv[3])
 include_patterns = []
+chunk_original = {}
+manifest_path = root / '.agent-state-backup-large-files' / 'manifest.json'
+if manifest_path.exists():
+    try:
+        for entry in json.loads(manifest_path.read_text(errors='ignore') or '{}').get('files', []):
+            original = entry.get('path')
+            for part in entry.get('parts', []):
+                if original and part:
+                    chunk_original[part] = original
+    except Exception:
+        pass
 if includes_file.exists():
     include_patterns = [line.strip() for line in includes_file.read_text(errors='ignore').splitlines() if line.strip() and not line.lstrip().startswith('#')]
 def matches(pattern, relpath):
@@ -772,7 +812,7 @@ for line in report.read_text(errors='ignore').splitlines():
         rel = str(Path(path).resolve().relative_to(root))
     except Exception:
         rel = path
-    if included(rel):
+    if included(chunk_original.get(rel, rel)):
         continue
     unresolved.append(rel)
 if unresolved:
