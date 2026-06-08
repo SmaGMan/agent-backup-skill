@@ -18,4 +18,8 @@ node_modules/
 .cache/
 home/.cache/
 profiles/budget/bin/tirith
-skills/autonomous-ai-agents/hermes-agent/references/cron-fallback-credential-pool-recovery.md
+google_token.json.before-scope-repair
+profiles/budget/google_token.json.symlink.backup
+chromium/etc/chromium.d/apikeys
+telegram-bridges/read/qr-login-2fa.url.txt
+telegram-bridges/write/qr-login-2fa.url.txt
