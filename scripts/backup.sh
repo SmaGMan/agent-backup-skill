@@ -15,6 +15,7 @@ MODIFIED_COUNT=0
 DELETED_COUNT=0
 NEW_SECRET_FINDINGS=0
 HERMES_PATCH_REPORT="not generated"
+REPORT_COMMIT="not created"
 mkdir -p "$BIN_DIR"
 
 print_report() {
@@ -34,7 +35,7 @@ fail() {
     secrets="yes"
   fi
   printf 'ERROR: %s\n' "$msg" > "$LAST_ERROR"
-  print_report "error" "not created" "$secrets" "$msg"
+  print_report "error" "$REPORT_COMMIT" "$secrets" "$msg"
   exit 1
 }
 say() { printf '%s\n' "$*"; }
@@ -892,6 +893,7 @@ print(added, modified, deleted)')"
     rm -f "$commit_out" "$push_out"
     fail "git commit failed: $err"
   fi
+  REPORT_COMMIT="$msg (created locally; push failed or status unknown)"
   token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -z "$token" ] && [ -f "$SOURCE_DIR/.env" ]; then
     token="$(python3 - "$SOURCE_DIR/.env" <<'PY'

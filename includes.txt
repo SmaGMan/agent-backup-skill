@@ -3,12 +3,6 @@
 # These paths override excludes and backup-time secret-like file removal.
 # Use only for user-approved false positives; real secrets should remain excluded/redacted.
 bin/tirith
-tmp/install_github_fine_grained_token.sh
-tmp/gh-install/share/man/man1/gh-secret-list.1
-tmp/gh-install/share/man/man1/gh-secret-set.1
-tmp/gh-install/share/man/man1/gh-secret-delete.1
-tmp/gh-install/share/man/man1/gh-auth-token.1
-tmp/gh-install/share/man/man1/gh-secret.1
 skills/devops/secure-state-backups/references/hermes-token-push-and-allowed-state-artifacts.md
 skills/devops/secure-state-backups/references/hermes-backup-cron-and-token-auth.md
 skills/.bundled_manifest
@@ -20,3 +14,4 @@ tirith-threatdb.dat
 state.db-wal
 state.db-shm
 .local/share/tirith/
+profiles/budget/state.db
