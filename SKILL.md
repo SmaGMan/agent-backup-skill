@@ -160,7 +160,7 @@ The cron job should run `backup.sh` as a no-agent script. The script prints a co
 - status;
 - commit message, or `no changes` / `not created`;
 - counts of added, modified, and deleted files;
-- whether the `/opt/hermes` customization patch was generated, including the patch filename and compact `+added/~modified/-deleted` patch counts;
+- whether the `/opt/hermes` customization patch was generated, including the patch filename and compact `+added/~modified/-deleted` patch counts; when there are no local customizations, report the actual `.manifest.txt` filename instead of the compatibility `.patch` pointer;
 - whether new scanner findings were detected;
 - whether errors occurred.
 

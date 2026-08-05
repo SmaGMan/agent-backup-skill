@@ -59,11 +59,12 @@ except Exception:
     raise SystemExit
 status = data.get('status') or 'generated'
 patch = data.get('patch_file') or 'unknown patch file'
+manifest = data.get('manifest_file') or 'unknown manifest file'
 added = int(data.get('added') or 0)
 modified = int(data.get('modified') or 0)
 deleted = int(data.get('deleted') or 0)
 if status == 'no changes':
-    print(f'no local customizations; manifest {patch}')
+    print(f'no local customizations; manifest {manifest}')
 else:
     print(f'generated {patch} (+{added}/~{modified}/-{deleted})')
 PY
