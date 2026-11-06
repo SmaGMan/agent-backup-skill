@@ -627,6 +627,7 @@ try:
 except Exception as e:
     raise SystemExit(f"could not parse gitleaks report: {e}")
 unresolved=[]; changed=[]
+redacted_findings = set()
 assign_re = re.compile(r'(?i)^\s*[^=:#]{0,120}(token|secret|password|api[_-]?key|private[_-]?key|access[_-]?key)[^=:#]{0,80}[=:#]')
 key_re = re.compile(r'^\s*["\']?([A-Za-z0-9_.-]*(?:token|secret|password|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_.-]*)["\']?\s*[=:#]', re.I)
 def finding_location(file, text, finding, secret):
@@ -647,13 +648,21 @@ def finding_location(file, text, finding, secret):
         if line_no:
             return f"{file} :: line {line_no}"
     return f"{file} :: unknown parameter"
-for finding in findings:
+# Redact containing values first so shorter matches cannot invalidate them.
+for finding in sorted(findings, key=lambda f: len(f.get('Secret') or f.get('secret') or ''), reverse=True):
     raw_file = finding.get('File') or finding.get('file')
     secret = finding.get('Secret') or finding.get('secret')
+    # This exact public sentinel contains no credential; scanners may flag it.
+    if secret == 'REDACTED_BY_AGENT_STATE_BACKUP':
+        continue
     if not raw_file:
         unresolved.append('unknown-file')
         continue
     file = normalize_finding_file(raw_file)
+    # A prior finding may already have replaced every occurrence in this file.
+    # Only skip exact duplicates after successful redaction, never binary errors.
+    if secret and (file, secret) in redacted_findings:
+        continue
     effective_file = chunk_original.get(file, file)
     if file in chunk_original:
         if is_force_included(effective_file):
@@ -671,6 +680,15 @@ for finding in findings:
         continue
     text = data.decode('utf-8', errors='ignore')
     original = text
+    # A longer value was already replaced in this same file. Only accept
+    # containment after proving no literal or serialized occurrence remains.
+    if secret and any(file == prior_file and secret in prior_secret
+                      for prior_file, prior_secret in redacted_findings):
+        forms = {secret, json.dumps(secret)[1:-1],
+                 secret.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')}
+        if not any(value and value in text for value in forms):
+            redacted_findings.add((file, secret))
+            continue
     if secret and secret in text:
         text = text.replace(secret, 'REDACTED_BY_AGENT_STATE_BACKUP')
     elif secret:
@@ -696,6 +714,8 @@ for finding in findings:
             continue
     if text != original:
         p.write_text(text, encoding='utf-8')
+        if secret:
+            redacted_findings.add((file, secret))
         changed.append(finding_location(file, original, finding, secret))
 if changed:
     with (root/'excluded.txt').open('a', encoding='utf-8') as f:
@@ -752,6 +772,10 @@ except Exception:
 count = 0
 for finding in findings:
     file = normalize_file(finding.get('File') or finding.get('file') or '')
+    # Do not mistake our exact public redaction sentinel for a live secret.
+    # Missing paths and values merely containing the sentinel still block.
+    if file and (finding.get('Secret') or finding.get('secret')) == 'REDACTED_BY_AGENT_STATE_BACKUP':
+        continue
     effective_file = chunk_original.get(file, file)
     if not file or not included(effective_file):
         count += 1

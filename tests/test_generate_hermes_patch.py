@@ -17,6 +17,47 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ExclusionTests(unittest.TestCase):
+    def test_root_tools_and_uv_cache_are_excluded(self) -> None:
+        for root in ("tools", "uv-cache"):
+            self.assertTrue(MODULE.is_excluded(root, is_dir=True))
+            self.assertTrue(MODULE.is_excluded(root + "/source.py"))
+            self.assertTrue(MODULE.is_excluded(root + "/nested/runtime.bin"))
+        for rel in ("agent/tools/source.py", "agent/uv-cache/source.py", "tools_extra/source.py", "uv-cache-extra/source.py"):
+            self.assertFalse(MODULE.is_excluded(rel), rel)
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td)
+            for root in ("tools", "uv-cache", "agent"):
+                (source / root).mkdir()
+                (source / root / "source.py").write_text("value = 1\n")
+            self.assertEqual(list(MODULE.iter_current_files(source)), ["agent/source.py"])
+
+    def test_managed_python_installations_remain_excluded(self) -> None:
+        for root in ("tools/python-3.14.9+20261021-linux-arm64", "tools/python-3.13.5-linux-x86_64"):
+            with self.subTest(root=root):
+                self.assertTrue(MODULE.is_excluded(root, is_dir=True))
+                for name in ("2621A", "2621a"):
+                    self.assertTrue(MODULE.is_excluded(root + "/share/terminfo/2/" + name))
+        for rel in ("agent/python-3.14/source.py", "agent/python_tool.py"):
+            self.assertFalse(MODULE.is_excluded(rel), rel)
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td)
+            python_root = source / "tools/python-3.14.9+20261021-linux-arm64"
+            python_root.mkdir(parents=True)
+            (python_root / "runtime.py").write_text("dependency = True\n")
+            (source / "tools/python_tool.py").write_text("source = True\n")
+            self.assertEqual(list(MODULE.iter_current_files(source)), [])
+
+    def test_generated_tools_install_lock_remains_excluded(self) -> None:
+        self.assertTrue(MODULE.is_excluded("tools/.install.lock"))
+        self.assertFalse(MODULE.is_excluded("agent/.install.lock"))
+        self.assertTrue(MODULE.is_excluded("tools/install.py"))
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td)
+            (source / "tools").mkdir()
+            (source / "tools/.install.lock").touch(mode=0o600)
+            (source / "tools/install.py").write_text("value = 1\n")
+            self.assertEqual(list(MODULE.iter_current_files(source)), [])
+
     def test_docker_context_omissions_are_excluded(self) -> None:
         excluded = [
             "tests/test_gateway.py",
@@ -38,7 +79,7 @@ class ExclusionTests(unittest.TestCase):
             "apps/shared/src/index.ts",
             "agent/agent_init.py",
             "gateway/run.py",
-            "tools/send_message_tool.py",
+            "agent/send_message_tool.py",
         ]
         for path in kept:
             with self.subTest(path=path):

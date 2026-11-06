@@ -14,6 +14,9 @@ Known explicit excludes are stored in the skill repo's `excludes.txt` file, not 
 - `keys/`
 - `/opt/data/git/` — all local git repositories, including this public skill repo and the private backup repo
 - local runtime files for this skill
+- `cache/uv/` — rebuildable uv package downloads under `/opt/data/cache/uv/`; other cache directories and application state are unaffected
+
+Exclude rules affect future snapshots only: they do not delete the live cache or erase older backup history. The `/opt/hermes` customization-patch generator separately excludes its entire root `tools/` and `uv-cache/` trees; this does not exclude `/opt/data/tools/` from state backups.
 
 Do not add broad state directories such as `sessions/` to `excludes.txt` unless the user explicitly asks to stop backing them up.
 
